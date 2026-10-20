@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/<owner>/nosignal/main/install.sh \
   | sudo bash -s -- --domain tel.example.com --admin myname
 ```
 
-No domain, or no internet on the server? Use the fully offline release file: `tar xzf tel-messenger-*-full.tar.gz && cd tel-messenger-*-full && sudo ./install.sh --ip-only --admin myname`. Details: [docs/INSTALL.md](docs/INSTALL.md).
+No domain, or no internet on the server? Use the fully offline release file: `tar xzf nosignal-*-full.tar.gz && cd nosignal-*-full && sudo ./install.sh --ip-only --admin myname`. Details: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Quick start (development)
 

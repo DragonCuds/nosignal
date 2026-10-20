@@ -9,11 +9,11 @@ There are two ways. Both use the same `install.sh` and both are safe to re-run (
 
 ## A. Fully offline release file (no internet on the server)
 
-Download `tel-messenger-<version>-linux-x64-full.tar.gz` (and its `.sha256`) once, copy it to the server, then:
+Download `nosignal-<version>-linux-x64-full.tar.gz` (and its `.sha256`) once, copy it to the server, then:
 
 ```sh
-sha256sum -c tel-messenger-*-full.tar.gz.sha256      # optional
-tar xzf tel-messenger-*-full.tar.gz && cd tel-messenger-*-full
+sha256sum -c nosignal-*-full.tar.gz.sha256      # optional
+tar xzf nosignal-*-full.tar.gz && cd nosignal-*-full
 sudo ./install.sh --ip-only --admin myname            # or: --domain tel.example.com
 ```
 
@@ -25,7 +25,7 @@ Default port is 3050 (no root-only port). For 443 either install with `--port 44
 `/usr/bin/ffmpeg` and `/usr/bin/ffprobe` are linked to the bundled ones only if the system has none (the app calls those paths).
 The bundled ffmpeg is an LGPL build (no GPL or non-free components, H.264 via OpenH264): see `THIRD-PARTY-NOTICES.md` for the licence and where to get its source.
 
-Update: copy the new release file and run `sudo /opt/tel-messenger/scripts/update.sh --source tel-messenger-NEW-full.tar.gz`.
+Update: copy the new release file and run `sudo /opt/tel-messenger/scripts/update.sh --source nosignal-NEW-full.tar.gz`.
 
 ## B. Online install (git/npm/apt, nginx + Let's Encrypt)
 

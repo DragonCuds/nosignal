@@ -35,7 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/<owner>/nosignal/main/install.sh \
   | sudo bash -s -- --domain tel.example.com --admin myname
 ```
 
-دامنه ندارید یا سرور اینترنت بین‌الملل ندارد؟ فایل کاملاً آفلاین را بگیرید: `tar xzf tel-messenger-*-full.tar.gz && cd tel-messenger-*-full && sudo ./install.sh --ip-only --admin myname`. جزئیات: [docs/INSTALL.md](docs/INSTALL.md) و [INSTALL-FA.md](INSTALL-FA.md).
+دامنه ندارید یا سرور اینترنت بین‌الملل ندارد؟ فایل کاملاً آفلاین را بگیرید: `tar xzf nosignal-*-full.tar.gz && cd nosignal-*-full && sudo ./install.sh --ip-only --admin myname`. جزئیات: [docs/INSTALL.md](docs/INSTALL.md) و [INSTALL-FA.md](INSTALL-FA.md).
 
 ## شروع سریع (توسعه)
 

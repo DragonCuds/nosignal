@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Builds ONE self-contained release file.
 #   scripts/build-bundle.sh [--light] [output-dir]
-# default (full):  tel-messenger-<ver>-linux-x64-full.tar.gz  = app + production node_modules (prebuilt native modules)
+# default (full):  nosignal-<ver>-linux-x64-full.tar.gz  = app + production node_modules (prebuilt native modules)
 #                  + pinned Node.js 24 binary + static ffmpeg/ffprobe + installer. Installs on a server with ZERO internet.
-# --light:         tel-messenger-<ver>-linux-<arch>.tar.gz   = same without Node/ffmpeg (server needs them installed).
+# --light:         nosignal-<ver>-linux-<arch>-light.tar.gz = same without Node/ffmpeg (server needs them installed).
 # Each file gets a .sha256 next to it and a SHA256SUMS inside.
 # Run on linux-x64 with internet (or with the downloads cached in $VENDOR_DIR).
 # Env: VENDOR_DIR (cache for downloaded tarballs, default <repo>/dist-bundle/vendor)
@@ -14,9 +14,9 @@ OUT="$(realpath -m "${1:-$SRC/dist-bundle}")"
 VENDOR="$(realpath -m "${VENDOR_DIR:-$SRC/dist-bundle/vendor}")"
 [ "$(uname -s)" = Linux ] || { echo "Build on Linux (native modules are platform specific)." >&2; exit 1; }
 ARCH="$(uname -m)"; VER="$(node -p "require('$SRC/package.json').version")"
-if $LIGHT; then FILE="tel-messenger-$VER-linux-$ARCH.tar.gz"; else
+if $LIGHT; then FILE="nosignal-$VER-linux-$ARCH-light.tar.gz"; else
   [ "$ARCH" = x86_64 ] || { echo "Full bundle is built for linux-x64 only (pinned binaries)." >&2; exit 1; }
-  FILE="tel-messenger-$VER-linux-x64-full.tar.gz"; fi
+  FILE="nosignal-$VER-linux-x64-full.tar.gz"; fi
 NAME="${FILE%.tar.gz}"
 NODE_VERSION=24.22.0
 NODE_SHA256=cc2f601cee82d9a5a233302fe307abc600727035fd7d2c3a3571755989e95008
@@ -43,7 +43,7 @@ echo "== 3/5 production node_modules + assemble"
 rm -rf node_modules apps/*/node_modules packages/*/node_modules
 npm ci --omit=dev --no-audit --no-fund
 B="$W/$NAME"; mkdir "$B"
-cp -a package.json package-lock.json node_modules deploy docs "$B/"
+cp -a package.json package-lock.json node_modules deploy docs assets "$B/"
 for f in LICENSE README.md README.fa.md INSTALL-FA.md DEPLOYMENT.md SECURITY.md THIRD-PARTY-NOTICES.md .env.example install.sh; do [ -e "$f" ] && cp "$f" "$B/"; done
 mkdir "$B/scripts"; cp scripts/update.sh scripts/backup.sh "$B/scripts/"
 for d in apps/server apps/web packages/media-contract packages/stickers; do

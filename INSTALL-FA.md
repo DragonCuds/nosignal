@@ -6,16 +6,16 @@
 
 ## چه چیزی لازم دارید
 - یک سرور لینوکس ۶۴ بیتی (اوبونتو ۲۲.۰۴ / ۲۴.۰۴ یا دبیان ۱۲) و دسترسی مدیر (root).
-- **راه آفلاین (پیشنهادی وقتی اینترنت بین‌الملل نیست):** فایل `tel-messenger-…-linux-x64-full.tar.gz` و فایل `.sha256` کنار آن. همه‌چیز (Node، ffmpeg، برنامه) داخل همین یک فایل است؛ سرور به هیچ اینترنتی نیاز ندارد و هیچ بسته‌ی سیستمی نصب یا تغییر نمی‌کند.
+- **راه آفلاین (پیشنهادی وقتی اینترنت بین‌الملل نیست):** فایل `nosignal-…-linux-x64-full.tar.gz` و فایل `.sha256` کنار آن. همه‌چیز (Node، ffmpeg، برنامه) داخل همین یک فایل است؛ سرور به هیچ اینترنتی نیاز ندارد و هیچ بسته‌ی سیستمی نصب یا تغییر نمی‌کند.
 - **راه آنلاین:** دامنه‌ای که به IP سرور اشاره کند.
 
 ## نصب آفلاین (یک فایل، چند دستور)
 1. فایل را روی سرور کپی کنید (فلش یا برنامه‌ی انتقال فایل).
-2. (اختیاری) بررسی سلامت فایل: `sha256sum -c tel-messenger-*.sha256` ؛ باید «OK» ببینید.
+2. (اختیاری) بررسی سلامت فایل: `sha256sum -c nosignal-*.sha256` ؛ باید «OK» ببینید.
 3. بزنید (به‌جای `myname` نام کاربری مدیر را بنویسید):
 
 ```
-tar xzf tel-messenger-*-full.tar.gz && cd tel-messenger-*-full
+tar xzf nosignal-*-full.tar.gz && cd nosignal-*-full
 sudo ./install.sh --ip-only --admin myname
 ```
 
@@ -46,7 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/<owner>/nosignal/main/install.sh | 
 بدون خاموش کردن سرویس: `sudo /opt/tel-messenger/scripts/backup.sh` ؛ فایل `.tar.gz` در `/var/backups/tel-messenger` ساخته می‌شود (۱۴ تای آخر نگه داشته می‌شود). فایل `/etc/tel-messenger.env` را هم جدا نگه دارید (رمزهای برنامه آنجاست؛ به کسی ندهید).
 
 ## به‌روزرسانی
-- آفلاین: فایل نسخه‌ی جدید را کپی کنید و بزنید: `sudo /opt/tel-messenger/scripts/update.sh --source tel-messenger-NEW-full.tar.gz`
+- آفلاین: فایل نسخه‌ی جدید را کپی کنید و بزنید: `sudo /opt/tel-messenger/scripts/update.sh --source nosignal-NEW-full.tar.gz`
 - آنلاین: `sudo /opt/tel-messenger/scripts/update.sh`
 - قبل از هر به‌روزرسانی از پایگاه‌داده خودکار پشتیبان گرفته می‌شود. اگر نسخه‌ی جدید سالم بالا نیاید، نسخه‌ی قبلی و داده‌ها خودکار برمی‌گردند. اطلاعات و رمزهای شما دست نمی‌خورد.
 

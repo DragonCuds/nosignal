@@ -8,7 +8,7 @@ SRC="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$(realpath -m "${1:-$SRC/dist-bundle}")"
 [ "$(uname -s)-$(uname -m)" = "Linux-x86_64" ] || { echo "Build on linux-x64 (native parts are built for this platform)." >&2; exit 1; }
 VER="$(node -p "require('$SRC/package.json').version")"
-NAME="tel-messenger-$VER-linux-x64"
+NAME="nosignal-$VER-linux-x64"
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
 B="$W/$NAME"; mkdir -p "$B/app" "$B/bin" "$B/node" "$OUT"
 

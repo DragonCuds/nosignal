@@ -319,7 +319,7 @@ if [[ $SRC_KIND == tar ]] && ! $DRY_RUN; then
   if [[ -n $top ]]; then SRC_KIND=bundle; SRC_VALUE=$(dirname "$top"); else SRC_KIND=tar; SRC_VALUE=$f; fi
 fi
 if [[ $SRC_KIND == bundle && ${S_SRC_KIND:-} == bundle && -z $SOURCE_TARBALL && $SCRIPT_DIR == "$APP_DIR" ]]; then
-  die 'This is an installed copy. To update, give the new release file: scripts/update.sh --source tel-messenger-NEW-full.tar.gz' \
+  die 'This is an installed copy. To update, give the new release file: scripts/update.sh --source nosignal-NEW-full.tar.gz' \
       'برای به‌روزرسانی فایل نسخه‌ی جدید را بدهید: scripts/update.sh --source فایل.tar.gz'
 fi
 FULL=false; SELF_TLS=false
