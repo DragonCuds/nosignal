@@ -8,7 +8,9 @@
  * - Android Chrome resizes the layout viewport itself (interactive-widget=resizes-content), so data-kb is never set there.
  * Safe-area insets: top/sides always, bottom only while the keyboard is closed.
  */
-html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+html, body { height: 100%; inset: 0; margin: 0; overflow: hidden; overscroll-behavior: none; position: fixed; width: 100%; }
+body { background: var(--bg-sidebar); }
+#root { height: 100%; position: relative; width: 100%; }
 html { --sat: env(safe-area-inset-top, 0px); --sab: env(safe-area-inset-bottom, 0px); --sal: env(safe-area-inset-left, 0px); --sar: env(safe-area-inset-right, 0px); }
 html[data-kb] { --sab: 0px; }
 
@@ -18,7 +20,7 @@ html[data-kb] { --sab: 0px; }
   padding-block-start: var(--sat);
   padding-left: var(--sal);
   padding-right: var(--sar);
-  position: fixed;
+  position: absolute;
 }
 .login { overflow-y: auto; overscroll-behavior: contain; padding-block-end: var(--sab); place-items: initial; -webkit-overflow-scrolling: touch; grid-template-rows: minmax(min-content, 1fr); }
 .login__card { margin: auto; }

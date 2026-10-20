@@ -28,13 +28,31 @@ export const installViewportFix = (): void => {
     for (const name of ['--vvt', '--vvb', '--vvh']) root.style.removeProperty(name);
     kbOn = false;
   };
+  // Hard reset: no keyboard state, no offsets, window back at 0,0 (iOS may have panned the page while the keyboard was up).
+  const reset = () => {
+    clear();
+    if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
+    if (document.scrollingElement && document.scrollingElement.scrollTop) document.scrollingElement.scrollTop = 0;
+  };
+  let probe: HTMLElement | null = null;
+  const insets = () => {
+    if (!probe) {
+      probe = document.createElement('div');
+      probe.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)';
+      document.body.appendChild(probe);
+    }
+    const c = getComputedStyle(probe);
+    return `${c.paddingTop} ${c.paddingRight} ${c.paddingBottom} ${c.paddingLeft}`;
+  };
 
   const render = () => {
     if (!overlay) return;
     const r = (document.querySelector('.messenger, .login, .splash') as HTMLElement | null)?.getBoundingClientRect();
     overlay.textContent =
-      `innerH ${window.innerHeight}  innerW ${window.innerWidth}  scrollY ${Math.round(window.scrollY)}\n` +
+      `innerH ${window.innerHeight}  innerW ${window.innerWidth}  clientH ${root.clientHeight}  scrollY ${Math.round(window.scrollY)}\n` +
       `vv h ${vv ? vv.height.toFixed(1) : '-'}  top ${vv ? vv.offsetTop.toFixed(1) : '-'}  scale ${vv ? vv.scale.toFixed(2) : '-'}\n` +
+      `safe T R B L ${insets()}\n` +
+      `data-kb ${root.hasAttribute('data-kb')}  vvt ${root.style.getPropertyValue('--vvt') || '-'}  vvb ${root.style.getPropertyValue('--vvb') || '-'}\n` +
       `kb ${kbOn ? 'ON' : 'off'}  focus ${document.activeElement?.tagName ?? '-'}  standalone ${matchMedia('(display-mode: standalone)').matches}\n` +
       `root top ${r ? r.top.toFixed(1) : '-'}  h ${r ? r.height.toFixed(1) : '-'}  bottom ${r ? r.bottom.toFixed(1) : '-'}`;
   };
@@ -52,9 +70,10 @@ export const installViewportFix = (): void => {
       root.style.setProperty('--vvb', `${bottom}px`);
       root.style.setProperty('--vvh', `${vv.height}px`);
       kbOn = true;
-    } else if (kbOn || root.hasAttribute('data-kb')) {
-      clear();
-      if (!isEditable(document.activeElement) && (window.scrollY || vv.offsetTop)) window.scrollTo(0, 0);
+    } else {
+      if (kbOn || root.hasAttribute('data-kb')) clear();
+      // Nothing editable focused: the page must sit at 0,0 (never keep an iOS pan offset).
+      if (!isEditable(document.activeElement) && (window.scrollX || window.scrollY || vv.offsetTop)) window.scrollTo(0, 0);
     }
     render();
   };
@@ -74,9 +93,10 @@ export const installViewportFix = (): void => {
   vv?.addEventListener('resize', schedule);
   vv?.addEventListener('scroll', schedule);
   window.addEventListener('resize', schedule);
-  window.addEventListener('orientationchange', () => { schedule(); watch(1200); });
-  window.addEventListener('pageshow', () => { schedule(); watch(800); });
-  document.addEventListener('visibilitychange', schedule);
+  window.addEventListener('orientationchange', () => { reset(); schedule(); watch(1200); });
+  window.addEventListener('pageshow', () => { reset(); schedule(); watch(800); });
+  document.addEventListener('visibilitychange', () => { reset(); schedule(); });
+  window.addEventListener('scroll', () => { if (!isEditable(document.activeElement)) reset(); }, { passive: true });
 
   document.addEventListener('focusin', (event) => {
     const el = event.target;
@@ -90,7 +110,7 @@ export const installViewportFix = (): void => {
   });
   document.addEventListener('focusout', () => {
     // Tapping from one field to another fires focusout then focusin: wait a beat before deciding the keyboard is gone.
-    setTimeout(() => { update(); watch(900); }, 60);
+    setTimeout(() => { if (!isEditable(document.activeElement)) reset(); update(); watch(900); }, 60);
   });
 
   if (debug) {
