@@ -167,10 +167,11 @@ export function Sidebar({ user, theme, chats, status, presence, selectedId, onSe
         <nav className="drawer__panel" aria-label="منوی اصلی">
           <div className="drawer__profile">
             <Avatar user={user} size={64} />
-            <strong dir="auto">{user.displayName}</strong>
-            <span className="drawer__id">{`\u2066@${user.username}\u2069`}
+            <strong className="drawer__name" dir="auto">{user.displayName}</strong>
+            <div className="drawer__id">
+              <span className="drawer__handle" dir="ltr">{`@${user.username}`}</span>
               <button className="drawer__copy" type="button" onClick={() => void copyId()} tabIndex={menuOpen ? 0 : -1} aria-label="کپی آیدی من"><CopyIcon />{copied ? 'کپی شد' : 'کپی'}</button>
-            </span>
+            </div>
           </div>
           <button type="button" onClick={go(onNewChat)} tabIndex={menuOpen ? 0 : -1}><ComposeIcon />گفتگوی جدید</button>
           <button type="button" onClick={go(onNewGroup)} tabIndex={menuOpen ? 0 : -1}><UsersIcon />گروه جدید</button>

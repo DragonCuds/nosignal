@@ -53,7 +53,7 @@ export const installViewportFix = (): void => {
       `vv h ${vv ? vv.height.toFixed(1) : '-'}  top ${vv ? vv.offsetTop.toFixed(1) : '-'}  scale ${vv ? vv.scale.toFixed(2) : '-'}\n` +
       `safe T R B L ${insets()}\n` +
       `data-kb ${root.hasAttribute('data-kb')}  vvt ${root.style.getPropertyValue('--vvt') || '-'}  vvb ${root.style.getPropertyValue('--vvb') || '-'}\n` +
-      `kb ${kbOn ? 'ON' : 'off'}  focus ${document.activeElement?.tagName ?? '-'}  standalone ${matchMedia('(display-mode: standalone)').matches}\n` +
+      `kb ${kbOn ? 'ON' : 'off'}  focus ${document.activeElement?.tagName ?? '-'}  standalone(mq) ${matchMedia('(display-mode: standalone)').matches}  navigator.standalone ${String((navigator as unknown as { standalone?: boolean }).standalone)}\n` +
       `root top ${r ? r.top.toFixed(1) : '-'}  h ${r ? r.height.toFixed(1) : '-'}  bottom ${r ? r.bottom.toFixed(1) : '-'}`;
   };
 
