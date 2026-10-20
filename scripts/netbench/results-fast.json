@@ -1,0 +1,52 @@
+{
+  "profile": "fast",
+  "steps": {
+    "COLD: load until login screen usable": 1693,
+    "COLD: sign-up tab appears (after login screen)": 43,
+    "COLD: sign-up until chat list shown": 972,
+    "COLD: find person by ID and open chat": 1379,
+    "COLD: send text (tick on my side)": 691,
+    "COLD: send text (arrives at the other person)": 1008,
+    "COLD: send ~300 KB photo (done on my side)": 956,
+    "COLD: send ~300 KB photo (arrives at the other person)": 1102,
+    "COLD: load until login screen usable (after cache clear)": 1324,
+    "COLD: log in until chat list shown": 1061,
+    "WARM: reopen (logged in) until chat list shown": 1163,
+    "WARM: load until login screen usable": 483,
+    "WARM: log in until chat list shown": 792,
+    "WARM: open chat until old messages shown": 707,
+    "WARM: send text (tick on my side)": 543,
+    "WARM: send text (arrives at the other person)": 297,
+    "WARM: send ~300 KB photo (done on my side)": 1094,
+    "WARM: send ~300 KB photo (arrives at the other person)": 1061,
+    "OFFLINE->ONLINE: text delivered after link returns": 555,
+    "OFFLINE: reload the app while offline until chat list shown": null,
+    "OFFLINE+RELOAD: queued text reaches the other person after link returns": 1548,
+    "OFFLINE: new tab opens the app until something usable shows": 2128
+  },
+  "bytes": {
+    "COLD first load (at login screen)": 411008,
+    "COLD first load (after settling)": 657236,
+    "COLD sign-up step": 2903,
+    "COLD find+open chat": 7608,
+    "COLD send text": 6759,
+    "COLD login load (at login screen)": 301089,
+    "COLD login load (after settling)": 721570,
+    "COLD login step": 722576,
+    "WARM reopen (at chat list)": 4054,
+    "WARM reopen (after settling)": 13053,
+    "WARM login load (at login screen)": 2974,
+    "WARM login load (after settling)": 3913,
+    "WARM open chat": 13520
+  },
+  "notes": {},
+  "facts": {
+    "COLD: send ~300 KB photo uploaded bytes": 74616,
+    "WARM: send ~300 KB photo uploaded bytes": 74616,
+    "offline send: bubble while offline": "shown as pending",
+    "offline send: copies on my screen / other person": "1 / 1",
+    "offline reload: what the screen shows": "LOGIN SCREEN (app shell loads, but chats are not shown)",
+    "offline+reload: copies on my screen / other person": "1 / 1",
+    "offline new tab: what the screen shows": "chat list (from cache)"
+  }
+}

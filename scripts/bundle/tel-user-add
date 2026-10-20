@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Runs the bundled user-add CLI against the installed data dir. Usage: sudo ./tel-user-add [--admin] <username> "<display name>"
+set -euo pipefail
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"; ENV_FILE="${ENV_FILE:-/etc/tel-messenger.env}"
+[ "$(id -u)" = 0 ] || { echo "Run as root: sudo $0 ..."; exit 1; }
+set -a; . "$ENV_FILE"; set +a
+cd "$APP_DIR"
+exec runuser -u tel-messenger -- env DATA_DIR="$DATA_DIR" SESSION_SECRET="$SESSION_SECRET" NODE_ENV=production \
+  "$APP_DIR/node/bin/node" apps/server/dist/cli/user-add.js "$@"

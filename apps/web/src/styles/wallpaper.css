@@ -1,0 +1,37 @@
+/* Custom chat wallpaper. Variables are set on <html> by wallpaper.ts; default pattern is untouched unless html[data-chat-wallpaper]. */
+html[data-chat-wallpaper] .conversation { overflow: hidden; }
+html[data-chat-wallpaper] .conversation::before {
+  background: var(--chat-wallpaper-image) center / cover no-repeat;
+  filter: blur(var(--chat-wallpaper-blur, 0px));
+  inset: calc(var(--chat-wallpaper-blur, 0px) * -2);
+  -webkit-mask: none; mask: none;
+  transform: translateZ(0);
+}
+html[data-chat-wallpaper] .conversation::after {
+  background: rgb(0 0 0 / var(--chat-wallpaper-dim, 0.2));
+  content: ''; inset: 0; pointer-events: none; position: absolute; z-index: 0;
+}
+
+/* Settings panel */
+.wallpaper-settings { display: grid; gap: 12px; }
+.wallpaper-preview {
+  align-content: end; aspect-ratio: 16 / 10; background: linear-gradient(160deg, var(--wall-a), var(--wall-b));
+  border-radius: 14px; display: grid; gap: 6px; isolation: isolate; max-width: 420px; overflow: hidden; padding: 12px; position: relative;
+}
+.wallpaper-preview[data-custom='1']::before {
+  background: var(--chat-wallpaper-image) center / cover no-repeat; content: ''; filter: blur(var(--chat-wallpaper-blur, 0px));
+  inset: calc(var(--chat-wallpaper-blur, 0px) * -2); position: absolute; z-index: -2;
+}
+.wallpaper-preview[data-custom='1']::after { background: rgb(0 0 0 / var(--chat-wallpaper-dim, 0.2)); content: ''; inset: 0; position: absolute; z-index: -1; }
+.wallpaper-preview__bubble { border-radius: 14px; font-size: 14px; padding: 6px 12px; width: fit-content; max-width: 80%; }
+.wallpaper-preview__bubble--in { background: var(--surface); color: var(--text); justify-self: start; }
+.wallpaper-preview__bubble--out { background: var(--accent); color: #fff; justify-self: end; }
+.wallpaper-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.wallpaper-btn { background: var(--accent-soft); border: 0; border-radius: 12px; color: var(--accent); cursor: pointer; font: inherit; min-height: 44px; padding: 8px 16px; }
+.wallpaper-btn--main { background: var(--accent); color: #fff; }
+.wallpaper-btn:disabled { cursor: default; opacity: 0.5; }
+.wallpaper-slider { display: grid; gap: 4px; max-width: 420px; }
+.wallpaper-slider > span { display: flex; justify-content: space-between; }
+.wallpaper-slider input { accent-color: var(--accent); width: 100%; }
+.wallpaper-error { color: #d33; font-size: 13px; margin: 0; }
+.wallpaper-note { font-size: 13px; margin: 0; opacity: 0.7; }

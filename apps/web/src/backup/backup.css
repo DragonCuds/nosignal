@@ -1,0 +1,5 @@
+.recovery-text { background: var(--field-bg, var(--surface-2)); border: 0; border-radius: 12px; color: var(--text); font-family: ui-monospace, monospace; font-size: 16px; line-height: 1.7; padding: 10px 14px; resize: vertical; width: 100%; }
+.recovery-text:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+.backup-check { align-items: center; display: flex; gap: 8px; margin-block: 10px; }
+.backup-check input { flex: none; height: 20px; width: 20px; }
+.backup-check span { font-size: 13px; line-height: 1.6; }

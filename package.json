@@ -1,0 +1,25 @@
+{
+  "name": "tel-messenger",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspaces --if-present",
+    "build": "npm run build --workspace=packages/media-contract --workspace=packages/stickers && npm run build --workspace=apps/server --workspace=apps/web",
+    "test": "node --test tests/**/*.test.mjs",
+    "test:security": "node --test tests/security/*.test.mjs",
+    "verify": "npm run build && npm run test:security && npm audit --omit=dev --audit-level=high",
+    "start": "npm run start --workspace=@tel-messenger/server",
+    "migrate": "npm run migrate --workspace=@tel-messenger/server",
+    "user:add": "npm run user:add --workspace=@tel-messenger/server --",
+    "check:offline": "node scripts/offline-check.mjs",
+    "check:offline:self-test": "node scripts/offline-check.mjs --self-test",
+    "device-test": "node scripts/device-test/server.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.14.0"
+  }
+}

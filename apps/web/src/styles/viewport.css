@@ -1,0 +1,42 @@
+/*
+ * Viewport model (iPhone Safari, installed PWA, Android Chrome).
+ * - The document never scrolls: html/body are overflow:hidden and only the app roots (position:fixed) exist.
+ * - Keyboard CLOSED (default, and whenever JS has not set data-kb): roots are `inset:0` = the layout viewport. No JS value is
+ *   involved, so nothing can leave an empty strip behind.
+ * - Keyboard OPEN on iOS (layout viewport stays full height, only the visual viewport shrinks and may be panned):
+ *   viewportFix.ts sets data-kb and --vvt (visual offsetTop) / --vvb (hidden bottom part); roots then sit exactly in the visible area.
+ * - Android Chrome resizes the layout viewport itself (interactive-widget=resizes-content), so data-kb is never set there.
+ * Safe-area insets: top/sides always, bottom only while the keyboard is closed.
+ */
+html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+html { --sat: env(safe-area-inset-top, 0px); --sab: env(safe-area-inset-bottom, 0px); --sal: env(safe-area-inset-left, 0px); --sar: env(safe-area-inset-right, 0px); }
+html[data-kb] { --sab: 0px; }
+
+.messenger, .login, .splash {
+  inset: var(--vvt, 0px) 0 var(--vvb, 0px) 0;
+  min-height: 0;
+  padding-block-start: var(--sat);
+  padding-left: var(--sal);
+  padding-right: var(--sar);
+  position: fixed;
+}
+.login { overflow-y: auto; overscroll-behavior: contain; padding-block-end: var(--sab); place-items: initial; -webkit-overflow-scrolling: touch; grid-template-rows: minmax(min-content, 1fr); }
+.login__card { margin: auto; }
+.messenger { padding-block-end: 0; }
+@media (min-width: 601px) { .login { padding: max(20px, var(--sat)) max(20px, var(--sar)) max(20px, var(--sab)) max(20px, var(--sal)); } }
+
+/* Bottom bars keep clear of the home indicator while the keyboard is closed. */
+.composer-wrap { padding-bottom: calc(12px + var(--sab)); }
+.sidebar__list { padding-bottom: calc(84px + var(--sab)); }
+.fab { bottom: calc(16px + var(--sab)); }
+.sticker-panel { padding-bottom: var(--sab); }
+@media (max-width: 600px) { .sticker-panel { bottom: var(--vvb, 0px); } }
+.chat-header, .sidebar__head { scroll-margin: 0; }
+
+/* Dialogs live in the top layer, positioned against the layout viewport: confine them to the visible area while the keyboard is up. */
+html[data-kb] dialog.sheet { bottom: var(--vvb, 0px); max-height: calc(var(--vvh, 100dvh) - 8px); top: var(--vvt, 0px); }
+@media (max-width: 600px) { dialog.sheet { padding-bottom: var(--sab); } }
+input, textarea, select { scroll-margin-block: 24px; }
+
+/* Debug overlay (?vvdebug=1) */
+.vvdebug { background: rgb(0 0 0 / 78%); color: #7CFC9A; direction: ltr; font: 10px/1.35 ui-monospace, Menlo, monospace; inset-block-start: 0; inset-inline-start: 0; padding: 3px 6px; pointer-events: none; position: fixed; white-space: pre; z-index: 2147483647; }

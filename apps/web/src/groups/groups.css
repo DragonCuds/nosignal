@@ -1,0 +1,13 @@
+/* Groups (gr-2) — builds on channels.css patterns */
+.group-form { overflow-y: auto; }
+.group-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.group-chip { align-items: center; background: var(--accent-soft, var(--surface-2)); border: 0; border-radius: 999px; color: var(--text-1, inherit); cursor: pointer; display: inline-flex; font: inherit; font-size: 13px; gap: 6px; padding: 4px 10px; }
+.group-chip svg { height: 14px; width: 14px; }
+.people-picker { display: flex; flex-direction: column; gap: 4px; }
+.group-info__top { display: flex; justify-content: center; }
+.chat-row--group .avatar { flex: none; }
+.group-sender { color: var(--accent); font-size: 12.5px; font-weight: 600; margin: 6px 0 -2px; padding-inline: 14px; }
+.group-info .channel-info__rename { align-items: stretch; flex-direction: column; }
+.group-info .channel-info__rename .field input { width: 100%; }
+.group-info .channel-row { flex-wrap: wrap; }
+.group-info .channel-row__name { min-width: 120px; }

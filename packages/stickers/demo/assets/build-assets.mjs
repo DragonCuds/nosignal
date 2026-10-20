@@ -1,0 +1,13 @@
+import { gzipSync } from 'node:zlib';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const directory = dirname(fileURLToPath(import.meta.url));
+mkdirSync(directory, { recursive: true });
+const base = { v: '5.7.4', fr: 30, ip: 0, op: 60, w: 512, h: 512, nm: 'CC0 demo sticker', ddd: 0, assets: [] };
+const circle = (name, color, transform) => ({ ty: 4, nm: name, sr: 1, st: 0, ip: 0, op: 60, bm: 0, ks: transform, shapes: [{ ty: 'el', p: { a: 0, k: [0, 0] }, s: { a: 0, k: [180, 180] }, nm: 'Circle' }, { ty: 'fl', c: { a: 0, k: color }, o: { a: 0, k: 100 }, r: 1, bm: 0, nm: 'Fill' }, { ty: 'tr', p: { a: 0, k: [0, 0] }, a: { a: 0, k: [0, 0] }, s: { a: 0, k: [100, 100] }, r: { a: 0, k: 0 }, o: { a: 0, k: 100 }, sk: { a: 0, k: 0 }, sa: { a: 0, k: 0 }, nm: 'Transform' }] });
+const transform = (position, scale = { a: 0, k: [100, 100] }) => ({ o: { a: 0, k: 100 }, r: { a: 0, k: 0 }, p: position, a: { a: 0, k: [0, 0] }, s: scale, sk: { a: 0, k: 0 }, sa: { a: 0, k: 0 } });
+const pulse = { ...base, layers: [circle('Pulse', [0.18, 0.65, 0.98, 1], transform({ a: 0, k: [256, 256] }, { a: 1, k: [{ t: 0, s: [68, 68] }, { t: 30, s: [112, 112] }, { t: 60, s: [68, 68] }] }))] };
+const orbit = { ...base, layers: [circle('Orbit', [1, 0.62, 0.12, 1], transform({ a: 1, k: [{ t: 0, s: [126, 256] }, { t: 15, s: [256, 126] }, { t: 30, s: [386, 256] }, { t: 45, s: [256, 386] }, { t: 60, s: [126, 256] }] }))] };
+const spark = { ...base, layers: [circle('Spark', [0.34, 0.9, 0.5, 1], transform({ a: 0, k: [256, 256] }, { a: 1, k: [{ t: 0, s: [100, 32] }, { t: 30, s: [32, 100] }, { t: 60, s: [100, 32] }] }))] };
+for (const [name, asset] of Object.entries({ pulse, orbit, spark })) writeFileSync(`${directory}/${name}.tgs`, gzipSync(JSON.stringify(asset), { level: 9 }));

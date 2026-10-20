@@ -1,0 +1,35 @@
+<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>تست دستگاه</title>
+<style>body{font-family:system-ui,sans-serif;margin:0;padding:20px;background:#fff;color:#111}h1{font-size:20px}.r{padding:12px 14px;margin:8px 0;border-radius:12px;background:#f2f4f7;display:flex;justify-content:space-between;gap:10px;align-items:center}.ok{background:#dff5e3}.no{background:#fde0e0}.na{background:#fff3cd}b{direction:ltr;text-align:left;word-break:break-all;font-size:13px}button{font:inherit;padding:12px 16px;border:0;border-radius:12px;background:#2a7de1;color:#fff;margin:6px 0}</style></head><body>
+<h1>تست دستگاه</h1><div id="out"></div>
+<button id="mic">تست میکروفون (اجازه بده)</button> <button id="cam">تست دوربین (اجازه بده)</button>
+<p id="s">در حال تست...</p>
+<script>
+const out=document.getElementById('out'),res={ua:navigator.userAgent,url:location.href},status=document.getElementById('s');
+const add=(k,v,ok)=>{res[k]=v;let d=document.getElementById('r-'+k);if(!d){d=document.createElement('div');d.id='r-'+k;out.appendChild(d)}
+ d.className='r '+(ok===true?'ok':ok===false?'no':'na');d.innerHTML='<span>'+k+'</span><b>'+String(v)+'</b>'};
+const send=async()=>{try{await fetch('/report',{method:'POST',body:JSON.stringify(res)});status.textContent='نتیجه برای من ارسال شد. ممنون.'}catch(e){status.textContent='ارسال نشد: '+e.message}};
+const t=async(name,fn)=>{try{const v=await fn();add(name,v===undefined?'ok':v,true)}catch(e){add(name,'fail: '+(e&&e.message||e),false)}};
+(async()=>{
+add('isSecureContext',String(isSecureContext),isSecureContext);
+add('standalone (home screen)',String(!!(navigator.standalone||matchMedia('(display-mode: standalone)').matches)),null);
+await t('crypto.subtle ECDH P-256',async()=>{await crypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},false,['deriveKey'])});
+await t('AES-GCM',async()=>{const k=await crypto.subtle.generateKey({name:'AES-GCM',length:256},true,['encrypt']);await crypto.subtle.encrypt({name:'AES-GCM',iv:new Uint8Array(12)},k,new Uint8Array(4))});
+await t('IndexedDB',()=>new Promise((a,b)=>{const r=indexedDB.open('t',1);r.onsuccess=()=>a();r.onerror=()=>b(r.error)}));
+await t('Service Worker',async()=>{const r=await navigator.serviceWorker.register('/sw.js');await navigator.serviceWorker.ready;return 'active='+!!r.active||'registered'});
+await t('Cache Storage',async()=>{const c=await caches.open('t');await c.put('/x',new Response('1'));return 'ok'});
+await t('storage.estimate',async()=>{const e=await navigator.storage.estimate();return Math.round((e.quota||0)/1048576)+' MB quota'});
+await t('storage.persist',async()=>String(await navigator.storage.persist()));
+add('WebAuthn (passkey)',String(!!window.PublicKeyCredential),!!window.PublicKeyCredential);
+add('Notification API',typeof Notification==='undefined'?'missing':Notification.permission,typeof Notification!=='undefined');
+add('PushManager',String('PushManager' in window),null);
+add('MediaRecorder',String(typeof MediaRecorder!=='undefined'),typeof MediaRecorder!=='undefined');
+if(typeof MediaRecorder!=='undefined'){const types=['audio/webm;codecs=opus','audio/mp4;codecs=mp4a.40.2','audio/mp4','audio/ogg;codecs=opus','video/webm;codecs=vp9','video/mp4'].filter(x=>MediaRecorder.isTypeSupported(x));add('MediaRecorder types',types.join(' | ')||'none',types.length>0)}
+await t('WebCodecs VideoEncoder H.264',async()=>{if(typeof VideoEncoder==='undefined')throw new Error('VideoEncoder missing');const r=await VideoEncoder.isConfigSupported({codec:'avc1.42001f',width:1280,height:720,bitrate:2e6});if(!r.supported)throw new Error('H.264 720p not supported');return 'supported'});
+await t('WebCodecs AudioEncoder AAC',async()=>{if(typeof AudioEncoder==='undefined')throw new Error('AudioEncoder missing');const r=await AudioEncoder.isConfigSupported({codec:'mp4a.40.2',sampleRate:48000,numberOfChannels:1,bitrate:64000});if(!r.supported)throw new Error('AAC not supported');return 'supported'});
+await t('createImageBitmap + OffscreenCanvas',async()=>{if(typeof OffscreenCanvas==='undefined')throw new Error('OffscreenCanvas missing');return 'ok'});
+await new Promise(r=>{try{const w=new WebSocket('wss://'+location.host+'/ws');const to=setTimeout(()=>{add('WebSocket','timeout',false);r()},5000);w.onmessage=e=>{clearTimeout(to);add('WebSocket',e.data,true);r()};w.onerror=()=>{clearTimeout(to);add('WebSocket','fail',false);r()}}catch(e){add('WebSocket','fail',false);r()}});
+status.textContent='بخش خودکار تمام شد. دو دکمه بالا را هم بزن.';await send();
+})();
+document.getElementById('mic').onclick=async()=>{await t('getUserMedia audio',async()=>{const s=await navigator.mediaDevices.getUserMedia({audio:true});s.getTracks().forEach(x=>x.stop());return 'ok'});await send()};
+document.getElementById('cam').onclick=async()=>{await t('getUserMedia video',async()=>{const s=await navigator.mediaDevices.getUserMedia({video:true});s.getTracks().forEach(x=>x.stop());return 'ok'});await send()};
+</script></body></html>

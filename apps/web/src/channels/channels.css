@@ -1,0 +1,21 @@
+/* Channels (os-9) */
+.channel-form { display: flex; flex-direction: column; gap: 12px; padding: 8px 20px 20px; }
+.channel-form__lead, .channel-info__meta { color: var(--text-3); font-size: 13px; line-height: 1.7; margin: 0; }
+.channel-join { text-align: center; }
+.channel-join h1 { margin-block: 8px 4px; }
+.channel-info { display: flex; flex-direction: column; gap: 14px; padding: 8px 20px 24px; }
+.channel-info__title { font-size: 18px; }
+.channel-info__rename { align-items: end; display: flex; gap: 10px; }
+.channel-info__rename .field { flex: 1; }
+.channel-info__section { display: flex; flex-direction: column; gap: 8px; }
+.channel-info__section h3 { font-size: 14px; margin: 6px 0 0; }
+.channel-info__danger { background: transparent; color: var(--danger); }
+.channel-info__note { background: var(--surface-2); border-radius: 12px; color: var(--text-2); font-size: 13px; padding: 10px 12px; }
+.channel-row { align-items: center; background: var(--surface-2); border-radius: 12px; display: flex; gap: 8px; padding: 8px 12px; }
+.channel-row__link, .channel-row__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.channel-row__name { display: flex; flex-direction: column; }
+.channel-row small { color: var(--text-3); font-size: 12px; }
+.chat-row--channel .avatar-saved { align-items: center; background: var(--accent-fill); border-radius: 50%; color: var(--on-accent); display: flex; flex: none; height: 52px; justify-content: center; width: 52px; }
+.chat-row--channel .avatar-saved svg { height: 26px; width: 26px; }
+.chat-header__identity--button { background: transparent; border: 0; color: inherit; cursor: pointer; font: inherit; text-align: start; }
+.channel-readonly { color: var(--text-3); font-size: 13.5px; padding: 14px 16px; text-align: center; }

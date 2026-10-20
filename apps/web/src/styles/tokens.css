@@ -1,0 +1,87 @@
+/* Tel design tokens. Light is the base; dark overrides under [data-theme="dark"]. */
+:root {
+  --font: Vazirmatn, Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --accent: #2b6fe0;
+  --accent-fill: #3479ea;
+  --accent-soft: rgb(52 121 234 / 12%);
+  --on-accent: #ffffff;
+  --danger: #e0434f;
+  --success: #2fae6b;
+  --online: #35c56d;
+
+  --bg-sidebar: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f0f2f5;
+  --surface-3: #e4e8ee;
+  --surface-glass: rgb(255 255 255 / 86%);
+  --text: #14181f;
+  --text-2: #5d6673;
+  --text-3: #8a93a0;
+  --hover: rgb(20 30 50 / 6%);
+  --press: rgb(20 30 50 / 12%);
+
+  --wall-a: #dbe5f3;
+  --wall-b: #c7d6ec;
+  --wall-ink: rgb(40 76 130 / 8%);
+
+  --bubble-in: #ffffff;
+  --bubble-in-text: #14181f;
+  --bubble-in-meta: #8a93a0;
+  --bubble-in-quote: var(--accent);
+  --bubble-out-a: #3b86f7;
+  --bubble-out-b: #2a68de;
+  --bubble-out-text: #ffffff;
+  --bubble-out-meta: rgb(255 255 255 / 78%);
+
+  --chip: rgb(26 44 74 / 46%);
+  --chip-text: #ffffff;
+  --media-meta: rgb(0 0 0 / 40%);
+
+  --shadow-float: 0 1px 2px rgb(20 40 80 / 14%);
+  --shadow-pop: 0 10px 34px rgb(10 24 50 / 22%);
+  --scrim: rgb(8 16 30 / 42%);
+  --skeleton: #e6eaf0;
+
+  --ease: cubic-bezier(.4, 0, .2, 1);
+  --ease-spring: cubic-bezier(.34, 1.56, .64, 1);
+}
+
+[data-theme="dark"] {
+  --accent: #6aa8ff;
+  --accent-fill: #3479ea;
+  --accent-soft: rgb(106 168 255 / 14%);
+
+  --bg-sidebar: #000;
+  --surface: #0c0c0d;
+  --surface-2: #1a1a1c;
+  --surface-3: #2a2a2d;
+  --surface-glass: rgb(20 20 22 / 88%);
+  --text: #f2f2f3;
+  --text-2: #a0a0a6;
+  --text-3: #707076;
+  --hover: rgb(255 255 255 / 6%);
+  --press: rgb(255 255 255 / 11%);
+
+  --wall-a: #070708;
+  --wall-b: #000;
+  --wall-ink: rgb(255 255 255 / 5%);
+
+  --bubble-in: #1c1c1e;
+  --bubble-in-text: #f0f0f2;
+  --bubble-in-meta: #86868c;
+  --bubble-out-a: #3576d6;
+  --bubble-out-b: #2859b0;
+
+  --chip: rgb(40 40 44 / 78%);
+  --media-meta: rgb(0 0 0 / 55%);
+
+  --shadow-float: 0 1px 2px rgb(0 0 0 / 40%);
+  --shadow-pop: 0 12px 38px rgb(0 0 0 / 70%);
+  --scrim: rgb(0 0 0 / 65%);
+  --skeleton: #1c1c1e;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}

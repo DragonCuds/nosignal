@@ -1,0 +1,5 @@
+/* No pinch / double-tap zoom (see zoomLock.ts). Layout of the viewport lives in viewport.css. */
+html, body, #root { touch-action: manipulation; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+@media (hover: none) and (pointer: coarse) {
+  input, textarea, select { font-size: 16px !important; }
+}

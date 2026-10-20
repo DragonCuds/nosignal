@@ -1,0 +1,23 @@
+/* Open signup: login tabs, ID hint, saved-messages row, ID search, own-ID copy */
+.login__tabs { background: var(--surface-2); border-radius: 12px; display: flex; gap: 4px; margin-block-end: 18px; padding: 4px; width: 100%; }
+.login__tabs button { background: transparent; border: 0; border-radius: 9px; color: var(--text-2); cursor: pointer; flex: 1; font: inherit; font-weight: 600; height: 36px; transition: background-color .15s ease, color .15s ease; }
+.login__tabs button.login__tab--active { background: var(--surface); box-shadow: var(--shadow-float); color: var(--accent); }
+.signup__hint { color: var(--text-3); display: block; font-size: 12px; margin-block-start: 6px; min-height: 18px; }
+.signup__hint--available { color: var(--success); }
+.signup__hint--taken, .signup__hint--invalid, .signup__hint--error { color: var(--danger); }
+
+.chat-row--saved .avatar-saved { align-items: center; background: var(--accent-fill); border-radius: 50%; color: var(--on-accent); display: flex; flex: none; height: 52px; justify-content: center; width: 52px; }
+.chat-row--saved .avatar-saved svg { height: 26px; width: 26px; }
+.sidebar__idsearch { padding: 0 10px 6px; }
+.idsearch__results { display: flex; flex-direction: column; gap: 2px; padding-block: 4px 8px; }
+.idsearch__result { align-items: center; background: transparent; border: 0; border-radius: 12px; cursor: pointer; display: flex; gap: 11px; padding: 6px 10px; text-align: start; width: 100%; }
+.idsearch__result:hover { background: var(--hover); }
+.idsearch__result span { display: flex; flex-direction: column; min-width: 0; }
+.idsearch__result small, .idsearch__note { color: var(--text-3); font-size: 12.5px; }
+.idsearch__note { padding: 6px 10px; }
+.drawer__id { align-items: center; display: flex; gap: 6px; justify-content: center; }
+.drawer__copy { align-items: center; background: transparent; border: 0; border-radius: 8px; color: var(--accent); cursor: pointer; display: inline-flex; font: inherit; font-size: 12.5px; gap: 4px; padding: 2px 8px; width: auto; }
+.drawer__copy svg { height: 16px; width: 16px; }
+.avatar-saved--head { align-items: center; background: var(--accent-fill); border-radius: 50%; color: var(--on-accent); display: flex; flex: none; height: 40px; justify-content: center; width: 40px; } .avatar-saved--head svg { height: 22px; width: 22px; }
+
+.signup__warning { background: var(--surface-2, rgba(255, 170, 0, 0.12)); border-radius: 12px; color: var(--text-2, inherit); font-size: 13px; line-height: 1.7; margin: 4px 0 8px; padding: 10px 12px; }

@@ -1,0 +1,6 @@
+Emoji images in this folder are from Google Noto Emoji (https://github.com/googlefonts/noto-emoji),
+Copyright Google LLC, licensed under the Apache License, Version 2.0 (full text in LICENSE next to this file).
+Country flag images are derived from the region-flags project (public domain / CC0 where applicable).
+The files were taken unmodified (other than lossless-ish PNG palette quantisation with pngquant)
+from the npm package emoji-datasource-google (MIT), which packages Noto Emoji.
+Regenerate with scripts/gen-emoji.mjs.
