@@ -3,5 +3,6 @@
 import { existsSync } from 'node:fs';
 
 export const FFMPEG = '/usr/bin/ffmpeg';
-export const skipNoFfmpeg = existsSync(FFMPEG) ? false : `ffmpeg not found at ${FFMPEG} (install it, e.g. apt-get install ffmpeg)`;
+// On CI a missing ffmpeg must fail loudly, never turn security tests into silent skips.
+export const skipNoFfmpeg = existsSync(FFMPEG) || process.env.CI ? false : `ffmpeg not found at ${FFMPEG} (install it, e.g. apt-get install ffmpeg)`;
 if (skipNoFfmpeg) console.warn(`# ${skipNoFfmpeg}: media fixture tests are skipped`);
