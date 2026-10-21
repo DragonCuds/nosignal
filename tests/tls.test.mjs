@@ -308,16 +308,16 @@ const strictVerify = (caCrt, crt, extra = []) => {
 
 const mintLeaf = (files, san) => signLeaf(files, san);
 
-/** Handshake with only `ca` as trust anchor; returns { authorized, error } for the chain (name match done separately). */
-const handshake = (crt, key, ca) => new Promise((resolve, reject) => {
+/** Handshake with only `ca` as trust anchor (verification stays ON); name match is done separately by the caller. */
+const handshake = (crt, key, ca) => new Promise((resolve) => {
   const server = tls.createServer({ cert: readFileSync(crt), key: readFileSync(key) }, (s) => s.end());
+  server.on('tlsClientError', () => {});
   server.listen(0, '127.0.0.1', () => {
-    const socket = tls.connect({ host: '127.0.0.1', port: server.address().port, ca, rejectUnauthorized: false,
+    const socket = tls.connect({ host: '127.0.0.1', port: server.address().port, ca,
       servername: 'ns11.invalid', checkServerIdentity: () => undefined }, () => {
-      const result = { authorized: socket.authorized, error: socket.authorizationError };
-      socket.destroy(); server.close(); resolve(result);
+      socket.destroy(); server.close(); resolve({ authorized: socket.authorized, error: socket.authorizationError });
     });
-    socket.on('error', (e) => { server.close(); reject(e); });
+    socket.on('error', (e) => { socket.destroy(); server.close(); resolve({ authorized: false, error: e.code || e.message }); });
   });
 });
 
