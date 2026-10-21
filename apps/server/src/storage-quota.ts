@@ -18,7 +18,7 @@ const MAX_INFLIGHT_PER_USER = 4;
 const MAX_INFLIGHT_SERVER = 16;
 
 export class StorageQuotaError extends Error {
-  constructor(public readonly status: 413 | 429 | 503, message: string) { super(message); }
+  constructor(public readonly status: 409 | 413 | 429 | 503, message: string) { super(message); }
 }
 
 type Usage = { committed: number; chunks: number; reserved: number; active: number };
@@ -67,11 +67,16 @@ const transaction = async <T>(work: (client: DbClient) => Promise<T>): Promise<T
 };
 
 // Reserve before buffering/streaming. An expired reservation can be reclaimed after a crashed worker.
-export const reserveStorage = async (userId: string, bytes: number): Promise<string> => {
+export const reserveStorage = async (userId: string, bytes: number, uploadId?: string): Promise<string> => {
   if (!Number.isSafeInteger(bytes) || bytes < 1) throw new StorageQuotaError(413, 'Invalid upload size');
-  const id = randomUUID();
+  const id = uploadId ?? randomUUID();
   await transaction(async (client) => {
     await client.query(`DELETE FROM storage_reservations WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`);
+    if (uploadId && ((await client.query('SELECT 1 FROM attachments WHERE id = $1', [id])).rowCount
+      || (await client.query('SELECT 1 FROM attachment_uploads WHERE id = $1', [id])).rowCount
+      || (await client.query('SELECT 1 FROM storage_reservations WHERE id = $1', [id])).rowCount)) {
+      throw new StorageQuotaError(409, 'Upload id already used');
+    }
     await checkCapacity(client, userId, bytes);
     await client.query(`INSERT INTO storage_reservations (id, user_id, byte_size, expires_at)
       VALUES ($1, $2, $3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+2 hours'))`, [id, userId, bytes]);
@@ -98,8 +103,23 @@ export const reserveChunkStorage = async (id: string, chatId: string, userId: st
   await transaction(async (client) => {
     if ((await client.query('SELECT 1 FROM attachment_uploads WHERE id = $1', [id])).rowCount) return;
     await client.query(`DELETE FROM storage_reservations WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`);
+    if ((await client.query('SELECT 1 FROM attachments WHERE id = $1', [id])).rowCount
+      || (await client.query('SELECT 1 FROM storage_reservations WHERE id = $1', [id])).rowCount) {
+      throw new StorageQuotaError(409, 'Upload id already used');
+    }
     await checkCapacity(client, userId, total);
     await client.query(`INSERT INTO attachment_uploads (id, chat_id, uploader_id, total_bytes, chunk_count)
       VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING`, [id, chatId, userId, total, count]);
+  });
+};
+
+// Move a chunked upload from reserved to committed bytes without a double-counting window.
+export const commitChunkStorage = async (id: string, total: number, insert: (client: DbClient) => Promise<void>): Promise<void> => {
+  await transaction(async (client) => {
+    const upload = (await client.query<{ total_bytes: number }>(
+      'SELECT total_bytes FROM attachment_uploads WHERE id = $1 AND finalizing = 1', [id])).rows[0];
+    if (!upload || Number(upload.total_bytes) !== total) throw new Error('Chunk reservation missing or changed');
+    await insert(client);
+    await client.query('DELETE FROM attachment_uploads WHERE id = $1', [id]);
   });
 };
