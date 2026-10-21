@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { after, before, test } from 'node:test';
+import { generateBackupablePair, wrapForServer, unwrapFromServer } from '../../apps/web/src/backup/crypto.ts';
 
 const root = path.resolve(import.meta.dirname, '../..');
 const dist = process.env.SERVER_DIST ? path.resolve(process.env.SERVER_DIST) : path.join(root, 'apps/server/dist');
@@ -26,16 +27,26 @@ const { requireTrustedOrigin, requireUser, resetLoginAttempts } = await load('au
 const { registerRegistration, resetRegistrationLimits } = await load('registration.js');
 const { registerCryptoRoutes } = await load('crypto.js');
 const { registerCryptoBackupRoutes } = await load('cryptoBackup.js');
+const { registerSecurityRoutes } = await load('security.js');
 
 let app;
 let nextIp = 1;
 const ip = () => `10.8.${nextIp >> 8}.${nextIp++ & 255}`;
+const passwords = new Map();
 const signup = async (username, password = 'correct-horse') => {
   const response = await app.inject({ method: 'POST', url: '/api/register', payload: { username, password }, remoteAddress: ip(), headers: { origin } });
   assert.equal(response.statusCode, 204, response.body);
-  return response.headers['set-cookie'].split(';')[0];
+  const cookie = response.headers['set-cookie'].split(';')[0];
+  passwords.set(cookie, password);
+  return cookie;
 };
-const call = (cookie, method, url, payload, ipOverride) => app.inject({ method, url, payload, headers: { origin, cookie }, remoteAddress: ipOverride ?? ip() });
+const call = async (cookie, method, url, payload, ipOverride) => {
+  if (method === 'PUT' && url === '/api/crypto/backup' && passwords.has(cookie)) {
+    const state = await app.inject({ method: 'GET', url, headers: { origin, cookie }, remoteAddress: ip() });
+    payload = { ...payload, password: passwords.get(cookie), expectedRevision: state.statusCode === 404 ? 0 : state.json().revision };
+  }
+  return app.inject({ method, url, payload, headers: { origin, cookie }, remoteAddress: ipOverride ?? ip() });
+};
 const b64 = (n) => 'A'.repeat(n);
 const goodBlob = (extra = {}) => ({ salt: b64(22), iterations: 600_000, wrapped: b64(300), version: 1, ...extra });
 const pub = (seed) => ({ kty: 'EC', crv: 'P-256', x: `${seed}`.repeat(43).slice(0, 43), y: `${seed}`.repeat(43).slice(0, 43) });
@@ -50,6 +61,7 @@ before(async () => {
   await registerRegistration(app);
   await registerCryptoRoutes(app);
   await registerCryptoBackupRoutes(app);
+  await registerSecurityRoutes(app);
   await app.ready();
 });
 after(async () => { await app.close(); await db.end(); await rm(dataDir, { recursive: true, force: true }); });
@@ -200,4 +212,80 @@ test('manual mode: a new identity does not silently create a server copy', async
   const got = (await call(cookie, 'GET', '/api/crypto/backup')).json();
   assert.equal(got.mode, 'manual');
   assert.equal(got.backup, null);
+});
+
+test('password change atomically rewraps the same identity and rejects stale backups', async () => {
+  const oldPassword = 'original long password';
+  const newPassword = 'replacement long password';
+  const cookie = await signup('bk_password_change', oldPassword);
+  const userId = (await db.query('SELECT id FROM users WHERE username = $1', ['bk_password_change'])).rows[0].id;
+  const pair = await generateBackupablePair();
+  const identity = { userId, publicKey: pair.publicJwk, privateKey: pair.privateJwk };
+  const oldBlob = await wrapForServer(identity, oldPassword);
+  assert.equal((await call(cookie, 'PUT', '/api/crypto/identity', { publicKey: pair.publicJwk, backup: oldBlob })).statusCode, 200);
+  const before = (await call(cookie, 'GET', '/api/crypto/backup')).json();
+  const newBlob = await wrapForServer(identity, newPassword);
+  const missing = await call(cookie, 'POST', '/api/security/password', { currentPassword: oldPassword, newPassword, expectedBackupRevision: before.revision });
+  assert.equal(missing.statusCode, 409, missing.body);
+  assert.deepEqual((await call(cookie, 'GET', '/api/crypto/backup')).json().backup, oldBlob);
+  const changed = await call(cookie, 'POST', '/api/security/password', {
+    currentPassword: oldPassword, newPassword, backup: newBlob, expectedBackupRevision: before.revision
+  });
+  assert.equal(changed.statusCode, 204, changed.body);
+  const latest = (await call(cookie, 'GET', '/api/crypto/backup')).json();
+  assert.equal(latest.revision, before.revision + 1);
+  assert.deepEqual(await unwrapFromServer(latest.backup, newPassword, userId), identity);
+  await assert.rejects(unwrapFromServer(latest.backup, oldPassword, userId), /bad-passphrase/);
+  const stale = await app.inject({ method: 'PUT', url: '/api/crypto/backup', payload: {
+    ...oldBlob, password: oldPassword, expectedRevision: before.revision
+  }, headers: { origin, cookie }, remoteAddress: ip() });
+  assert.equal(stale.statusCode, 403);
+  const staleWithCurrentPassword = await app.inject({ method: 'PUT', url: '/api/crypto/backup', payload: {
+    ...oldBlob, password: newPassword, expectedRevision: before.revision
+  }, headers: { origin, cookie }, remoteAddress: ip() });
+  assert.equal(staleWithCurrentPassword.statusCode, 409);
+  assert.deepEqual((await call(cookie, 'GET', '/api/crypto/backup')).json().backup, newBlob);
+  const second = await call(cookie, 'POST', '/api/security/password', {
+    currentPassword: oldPassword, newPassword: 'third long password', backup: oldBlob, expectedBackupRevision: latest.revision
+  });
+  assert.equal(second.statusCode, 403);
+});
+
+test('manual mode changes password without creating an automatic copy', async () => {
+  const cookie = await signup('bk_manual_password', 'manual old password');
+  await call(cookie, 'DELETE', '/api/crypto/backup');
+  assert.equal((await call(cookie, 'PUT', '/api/crypto/identity', { publicKey: pub('m'), backup: goodBlob() })).statusCode, 200);
+  const state = (await call(cookie, 'GET', '/api/crypto/backup')).json();
+  const response = await call(cookie, 'POST', '/api/security/password', {
+    currentPassword: 'manual old password', newPassword: 'manual new password', expectedBackupRevision: state.revision
+  });
+  assert.equal(response.statusCode, 204, response.body);
+  const next = (await call(cookie, 'GET', '/api/crypto/backup')).json();
+  assert.equal(next.mode, 'manual');
+  assert.equal(next.backup, null);
+  assert.equal(next.revision, state.revision + 1);
+});
+
+test('a password update failure rolls back the backup replacement', async () => {
+  const cookie = await signup('bk_rollback', 'rollback old password');
+  const userId = (await db.query('SELECT id FROM users WHERE username = $1', ['bk_rollback'])).rows[0].id;
+  const pair = await generateBackupablePair();
+  const identity = { userId, publicKey: pair.publicJwk, privateKey: pair.privateJwk };
+  const oldBlob = await wrapForServer(identity, 'rollback old password');
+  await call(cookie, 'PUT', '/api/crypto/identity', { publicKey: pair.publicJwk, backup: oldBlob });
+  const state = (await call(cookie, 'GET', '/api/crypto/backup')).json();
+  const replacement = await wrapForServer(identity, 'rollback new password');
+  await db.query(`CREATE TRIGGER fail_password_hash BEFORE UPDATE OF password_hash ON users
+    WHEN OLD.username = 'bk_rollback' BEGIN SELECT RAISE(ABORT, 'test rollback'); END`);
+  try {
+    const failed = await call(cookie, 'POST', '/api/security/password', {
+      currentPassword: 'rollback old password', newPassword: 'rollback new password',
+      backup: replacement, expectedBackupRevision: state.revision
+    });
+    assert.equal(failed.statusCode, 500);
+  } finally { await db.query('DROP TRIGGER fail_password_hash'); }
+  const after = (await call(cookie, 'GET', '/api/crypto/backup')).json();
+  assert.deepEqual(after.backup, oldBlob);
+  assert.equal(after.revision, state.revision);
+  assert.equal((await call(cookie, 'POST', '/api/crypto/password-check', { password: 'rollback old password' })).statusCode, 204);
 });

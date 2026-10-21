@@ -207,8 +207,8 @@ export const api = {
   register: (username: string, password: string, displayName?: string) =>
     request<void>('/api/register', { method: 'POST', body: JSON.stringify({ username, password, displayName }) }),
   registerCryptoIdentity: (publicKey: JsonWebKey, backup?: { salt: string; iterations: number; wrapped: string; version: 1 }) => request<{ fingerprint: string; backupSaved?: boolean }>('/api/crypto/identity', { method: 'PUT', body: JSON.stringify(backup ? { publicKey, backup } : { publicKey }) }),
-  cryptoBackup: () => request<{ mode: 'auto' | 'manual'; backup: { salt: string; iterations: number; wrapped: string; version: 1 } | null; updatedAt: string }>('/api/crypto/backup'),
-  putCryptoBackup: (blob: { salt: string; iterations: number; wrapped: string; version: 1 }) => request<void>('/api/crypto/backup', { method: 'PUT', body: JSON.stringify(blob) }),
+  cryptoBackup: () => request<{ mode: 'auto' | 'manual'; backup: { salt: string; iterations: number; wrapped: string; version: 1 } | null; revision: number; updatedAt: string }>('/api/crypto/backup'),
+  putCryptoBackup: (blob: { salt: string; iterations: number; wrapped: string; version: 1 }, password: string, expectedRevision: number) => request<void>('/api/crypto/backup', { method: 'PUT', body: JSON.stringify({ ...blob, password, expectedRevision }) }),
   deleteCryptoBackup: () => request<void>('/api/crypto/backup', { method: 'DELETE' }),
   resetCryptoIdentity: (password: string) => request<void>('/api/crypto/identity/reset', { method: 'POST', body: JSON.stringify({ password }) }),
   checkPassword: (password: string) => request<void>('/api/crypto/password-check', { method: 'POST', body: JSON.stringify({ password }) }),
@@ -364,5 +364,5 @@ export const api = {
   passkeyRegistrationOptions: (password: string, secondFactor?: string) => request<PublicKeyCredentialCreationOptionsJSON>('/api/auth/passkeys/register/options', { method: 'POST', body: JSON.stringify({ password, secondFactor }) }),
   verifyPasskeyRegistration: (response: RegistrationResponseJSON, name?: string) => request<void>('/api/auth/passkeys/register/verify', { method: 'POST', body: JSON.stringify({ response, name }) }),
   deletePasskey: (id: string, password: string, secondFactor?: string) => request<void>(`/api/security/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ password, secondFactor }) }),
-  changePassword: (currentPassword: string, newPassword: string, secondFactor?: string) => request<void>('/api/security/password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword, secondFactor }) }),
+  changePassword: (currentPassword: string, newPassword: string, expectedBackupRevision: number, backup?: { salt: string; iterations: number; wrapped: string; version: 1 }, secondFactor?: string) => request<void>('/api/security/password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword, expectedBackupRevision, backup, secondFactor }) }),
 };

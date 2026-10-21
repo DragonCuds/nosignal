@@ -23,10 +23,11 @@ export const parseBackupBlob = (body: { salt?: unknown; iterations?: unknown; wr
   return { salt, iterations: iterations as number, wrapped };
 };
 
-type Row = { mode: 'auto' | 'manual'; salt: string | null; iterations: number | null; wrapped: string | null; version: number | null; updated_at: string };
+type Row = { mode: 'auto' | 'manual'; salt: string | null; iterations: number | null; wrapped: string | null; version: number | null; revision: number; updated_at: string };
 
 const view = (row: Row) => ({
   mode: row.mode,
+  revision: row.revision,
   backup: row.wrapped === null ? null : { salt: row.salt, iterations: row.iterations, wrapped: row.wrapped, version: row.version },
   updatedAt: row.updated_at
 });
@@ -35,33 +36,50 @@ export const registerCryptoBackupRoutes = async (app: FastifyInstance): Promise<
   // 404 = this account has never stored anything (no copy, no mode choice yet).
   app.get('/api/crypto/backup', { preHandler: app.requireUser, config: { rateLimit: READ_LIMIT } }, async (request, reply) => {
     reply.header('cache-control', 'no-store');
-    const row = (await db.query<Row>('SELECT mode, salt, iterations, wrapped, version, updated_at FROM user_crypto_backups WHERE user_id = $1', [request.user!.id])).rows[0];
+    const row = (await db.query<Row>('SELECT mode, salt, iterations, wrapped, version, revision, updated_at FROM user_crypto_backups WHERE user_id = $1', [request.user!.id])).rows[0];
     if (!row) return reply.code(404).send({ error: 'No key backup' });
     return view(row);
   });
 
   // Stores/replaces the one copy of the caller and switches the account to mode "auto".
-  app.put<{ Body: { salt?: unknown; iterations?: unknown; wrapped?: unknown; version?: unknown } }>('/api/crypto/backup', {
+  app.put<{ Body: { salt?: unknown; iterations?: unknown; wrapped?: unknown; version?: unknown; expectedRevision?: unknown; password?: unknown } }>('/api/crypto/backup', {
     config: { rateLimit: WRITE_LIMIT }, preHandler: app.requireUser, bodyLimit: 16 * 1024
   }, async (request, reply) => {
     const blob = parseBackupBlob(request.body);
     if (!blob) return reply.code(400).send({ error: 'Invalid key backup' });
+    const expected = request.body?.expectedRevision;
+    if (!Number.isSafeInteger(expected) || (expected as number) < 0) return reply.code(400).send({ error: 'Expected backup revision is required' });
+    const password = request.body?.password;
+    if (typeof password !== 'string' || password.length > 1_024) return reply.code(403).send({ error: 'Reauthentication failed' });
     const { salt, iterations, wrapped } = blob;
-    await db.query(
-      `INSERT INTO user_crypto_backups (user_id, mode, salt, iterations, wrapped, version, updated_at)
-       VALUES ($1, 'auto', $2, $3, $4, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-       ON CONFLICT (user_id) DO UPDATE SET mode = 'auto', salt = excluded.salt, iterations = excluded.iterations,
-         wrapped = excluded.wrapped, version = 1, updated_at = excluded.updated_at`,
-      [request.user!.id, salt, iterations, wrapped]
-    );
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const account = (await client.query<{ password_hash: string }>('SELECT password_hash FROM users WHERE id = $1', [request.user!.id])).rows[0];
+      if (!account || !(await verifyPassword(account.password_hash, password))) {
+        await client.query('ROLLBACK'); return reply.code(403).send({ error: 'Reauthentication failed' });
+      }
+      const current = (await client.query<{ revision: number }>('SELECT revision FROM user_crypto_backups WHERE user_id = $1', [request.user!.id])).rows[0];
+      if ((current?.revision ?? 0) !== expected) { await client.query('ROLLBACK'); return reply.code(409).send({ error: 'Key backup changed; reload and retry' }); }
+      if (current) {
+        await client.query(`UPDATE user_crypto_backups SET mode = 'auto', salt = $2, iterations = $3, wrapped = $4,
+          version = 1, revision = revision + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = $1`,
+        [request.user!.id, salt, iterations, wrapped]);
+      } else {
+        await client.query(`INSERT INTO user_crypto_backups (user_id, mode, salt, iterations, wrapped, version, revision)
+          VALUES ($1, 'auto', $2, $3, $4, 1, 1)`, [request.user!.id, salt, iterations, wrapped]);
+      }
+      await client.query('COMMIT');
+    } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
     return reply.code(204).send();
   });
 
   // Removes the server copy and records the choice "manual" so clients do not upload again.
   app.delete('/api/crypto/backup', { preHandler: app.requireUser, config: { rateLimit: WRITE_LIMIT } }, async (request, reply) => {
     await db.query(
-      `INSERT INTO user_crypto_backups (user_id, mode, updated_at) VALUES ($1, 'manual', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-       ON CONFLICT (user_id) DO UPDATE SET mode = 'manual', salt = NULL, iterations = NULL, wrapped = NULL, version = NULL, updated_at = excluded.updated_at`,
+      `INSERT INTO user_crypto_backups (user_id, mode, revision, updated_at) VALUES ($1, 'manual', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       ON CONFLICT (user_id) DO UPDATE SET mode = 'manual', salt = NULL, iterations = NULL, wrapped = NULL, version = NULL,
+         revision = revision + 1, updated_at = excluded.updated_at`,
       [request.user!.id]
     );
     return reply.code(204).send();
@@ -100,7 +118,7 @@ export const registerCryptoBackupRoutes = async (app: FastifyInstance): Promise<
       await client.query('UPDATE groups SET pending_version = COALESCE(pending_version, key_version + 1) WHERE key_version > 0 AND chat_id IN (SELECT chat_id FROM chat_members WHERE user_id = $1)', [userId]);
       // The old wrapped key no longer matches the account; the chosen mode (auto/manual) is kept.
       await client.query(`UPDATE user_crypto_backups SET salt = NULL, iterations = NULL, wrapped = NULL, version = NULL,
-        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = $1`, [userId]);
+        revision = revision + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = $1`, [userId]);
       await client.query('COMMIT');
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
     return reply.code(204).send();

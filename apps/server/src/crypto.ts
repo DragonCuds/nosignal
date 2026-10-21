@@ -50,10 +50,10 @@ export const registerCryptoRoutes = async (app: FastifyInstance): Promise<void> 
       if (backup && (mode === undefined || mode === 'auto')) {
         backupSaved = true;
         await client.query(
-          `INSERT INTO user_crypto_backups (user_id, mode, salt, iterations, wrapped, version, updated_at)
-           VALUES ($1, 'auto', $2, $3, $4, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+          `INSERT INTO user_crypto_backups (user_id, mode, salt, iterations, wrapped, version, revision, updated_at)
+           VALUES ($1, 'auto', $2, $3, $4, 1, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
            ON CONFLICT (user_id) DO UPDATE SET salt = excluded.salt, iterations = excluded.iterations, wrapped = excluded.wrapped,
-             version = 1, updated_at = excluded.updated_at WHERE user_crypto_backups.mode = 'auto'`,
+             version = 1, revision = revision + 1, updated_at = excluded.updated_at WHERE user_crypto_backups.mode = 'auto'`,
           [userId, backup.salt, backup.iterations, backup.wrapped]
         );
       }

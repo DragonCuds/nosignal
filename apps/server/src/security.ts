@@ -11,6 +11,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { clearSessionCookie, createSession, currentTokenHash, getSessionId, getSessionToken, notifySessionsRevoked, verifyPassword } from './auth.js';
 import { config } from './config.js';
 import { db } from './db.js';
+import { parseBackupBlob } from './cryptoBackup.js';
 import { decryptMfaSecret, encryptMfaSecret, generateRecoveryCodes, generateTotpSecret, recoveryCodeHash, verifyTotp } from './totp.js';
 
 const FLOW_COOKIE = 'tel_webauthn_flow';
@@ -337,18 +338,51 @@ export const registerSecurityRoutes = async (app: FastifyInstance): Promise<void
     return deleted.rowCount ? reply.code(204).send() : reply.code(404).send({ error: 'Passkey not found' });
   });
 
-  app.post<{ Body: { currentPassword?: string; newPassword?: string; secondFactor?: string } }>('/api/security/password', {
-    preHandler: app.requireUser, config: { rateLimit: { max: 5, timeWindow: '1 hour' } }
+  app.post<{ Body: { currentPassword?: string; newPassword?: string; secondFactor?: string; backup?: unknown; expectedBackupRevision?: unknown } }>('/api/security/password', {
+    preHandler: app.requireUser, bodyLimit: 16 * 1024, config: { rateLimit: { max: 5, timeWindow: '1 hour' } }
   }, async (request, reply) => {
-    const { currentPassword, newPassword, secondFactor } = request.body ?? {};
-    if (!(await verifyReauthentication(request.user!.id, currentPassword, secondFactor))) return reply.code(401).send({ error: 'Reauthentication failed' });
+    const { currentPassword, newPassword, secondFactor, expectedBackupRevision } = request.body ?? {};
+    if (typeof currentPassword !== 'string' || currentPassword.length > 1_024) return reply.code(403).send({ error: 'Reauthentication failed' });
     if (typeof newPassword !== 'string' || newPassword.length < 12 || newPassword.length > 1_024) {
       return reply.code(400).send({ error: 'New password must be at least 12 characters' });
+    }
+    if (!Number.isSafeInteger(expectedBackupRevision) || (expectedBackupRevision as number) < 0) {
+      return reply.code(400).send({ error: 'Expected backup revision is required' });
+    }
+    const rawBackup = request.body?.backup;
+    const backup = rawBackup === undefined ? null : parseBackupBlob(rawBackup as Parameters<typeof parseBackupBlob>[0]);
+    if (rawBackup !== undefined && !backup) return reply.code(400).send({ error: 'Invalid key backup' });
+    if ((await hasTotp(request.user!.id)) && !(await verifySecondFactor(request.user!.id, secondFactor))) {
+      return reply.code(403).send({ error: 'Reauthentication failed' });
     }
     const hash = await argon2.hash(newPassword, { type: argon2.argon2id });
     const client = await db.connect();
     try {
       await client.query('BEGIN');
+      const account = (await client.query<{ password_hash: string }>('SELECT password_hash FROM users WHERE id = $1', [request.user!.id])).rows[0];
+      if (!account || !(await verifyPassword(account.password_hash, currentPassword))) {
+        await client.query('ROLLBACK'); return reply.code(403).send({ error: 'Reauthentication failed' });
+      }
+      const state = (await client.query<{ mode: 'auto' | 'manual'; revision: number }>(
+        'SELECT mode, revision FROM user_crypto_backups WHERE user_id = $1', [request.user!.id]
+      )).rows[0];
+      if ((state?.revision ?? 0) !== expectedBackupRevision) {
+        await client.query('ROLLBACK'); return reply.code(409).send({ error: 'Key backup changed; reload and retry' });
+      }
+      const mode = state?.mode ?? 'auto';
+      const hasIdentity = (await client.query('SELECT 1 FROM user_crypto_identities WHERE user_id = $1', [request.user!.id])).rowCount === 1;
+      if ((mode === 'auto' && hasIdentity && !backup) || (mode === 'manual' && backup)) {
+        await client.query('ROLLBACK'); return reply.code(409).send({ error: 'Current encryption identity backup is required for Auto mode' });
+      }
+      if (state) {
+        await client.query(`UPDATE user_crypto_backups SET salt = $2, iterations = $3, wrapped = $4, version = $5,
+          revision = revision + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE user_id = $1`,
+        [request.user!.id, backup?.salt ?? null, backup?.iterations ?? null, backup?.wrapped ?? null, backup ? 1 : null]);
+      } else {
+        await client.query(`INSERT INTO user_crypto_backups (user_id, mode, salt, iterations, wrapped, version, revision)
+          VALUES ($1, 'auto', $2, $3, $4, $5, 1)`,
+        [request.user!.id, backup?.salt ?? null, backup?.iterations ?? null, backup?.wrapped ?? null, backup ? 1 : null]);
+      }
       await client.query('UPDATE users SET password_hash = $2 WHERE id = $1', [request.user!.id, hash]);
       await client.query('DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2', [request.user!.id, currentTokenHash(request)]);
       await client.query('COMMIT');

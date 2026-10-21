@@ -1,0 +1,1 @@
+ALTER TABLE user_crypto_backups ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;

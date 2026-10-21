@@ -18,7 +18,8 @@ export const fetchServerBackup = async (): Promise<ServerBackupState> => {
 const samePublic = (a: JsonWebKey, b: JsonWebKey) => a.x === b.x && a.y === b.y;
 
 export const uploadBackup = async (payload: BackupPayload, password: string): Promise<void> => {
-  await api.putCryptoBackup(await wrapForServer(payload, password));
+  const remote = await fetchServerBackup();
+  await api.putCryptoBackup(await wrapForServer(payload, password), password, remote?.revision ?? 0);
 };
 
 // ---- "Not saved yet" tracking ------------------------------------------------------------------------
@@ -44,7 +45,9 @@ const settle = async (userId: string, password: string): Promise<boolean> => {
   const mine = await exportLocalIdentity(userId);
   if (!mine) return true; // nothing exportable (old non-extractable key)
   if (remote?.backup) {
-    try { if (samePublic((await unwrapFromServer(remote.backup, password, userId)).publicKey, mine.publicKey)) return true; } catch { /* stale: replace */ }
+    const stored = await unwrapFromServer(remote.backup, password, userId);
+    if (samePublic(stored.publicKey, mine.publicKey)) return true;
+    throw new Error('Key backup differs from local identity');
   }
   await uploadBackup(mine, password);
   return true;
@@ -54,7 +57,11 @@ function attemptRetry(): void {
   const job = retry;
   if (!job) return;
   job.tries += 1;
-  void settle(job.userId, job.password).then(() => { if (retry === job) stopRetry(); }).catch(() => { if (retry === job && job.tries >= 120) stopRetry(); });
+  void settle(job.userId, job.password).then(() => { if (retry === job) stopRetry(); }).catch((error) => {
+    if (retry === job && ((error instanceof ApiError && (error.status === 403 || error.status === 409))
+      || (error instanceof Error && (error.message === 'bad-passphrase' || error.message === 'Key backup differs from local identity'))
+      || job.tries >= 120)) stopRetry();
+  });
 }
 
 const queueRetry = (userId: string, password: string): void => {
@@ -118,7 +125,8 @@ export const syncBackupAfterLogin = async (userId: string, password: string): Pr
       try {
         const stored = await unwrapFromServer(remote.backup, password, userId);
         if (samePublic(stored.publicKey, mine.publicKey)) return 'unchanged';
-      } catch { /* password changed or stale copy: wrap again below */ }
+        return 'needs-choice';
+      } catch { return 'needs-choice'; }
     }
     return await uploadOrQueue(userId, password);
   } catch { return 'offline'; }
@@ -127,4 +135,24 @@ export const syncBackupAfterLogin = async (userId: string, password: string): Pr
 /** New account (signup form or invite): make the identity now and store its password-wrapped copy before the app opens. */
 export const setupBackupAfterSignup = async (userId: string, password: string): Promise<void> => {
   await ensureKeyAndBackup(userId, password);
+};
+
+/** Rewrap the same identity before atomically changing the login password and backup. */
+export const changePasswordAndBackup = async (userId: string, currentPassword: string, newPassword: string, secondFactor?: string): Promise<void> => {
+  const remote = await fetchServerBackup();
+  let backup: Awaited<ReturnType<typeof wrapForServer>> | undefined;
+  if (remote?.mode !== 'manual') {
+    const local = await exportLocalIdentity(userId);
+    let identity: BackupPayload | null = null;
+    if (remote?.backup) {
+      try { identity = await unwrapFromServer(remote.backup, currentPassword, userId); }
+      catch { throw new Error('پشتیبان فعلی با رمز عبور کنونی باز نشد. ابتدا کلید این حساب را بازیابی کنید.'); }
+      if (local && !samePublic(local.publicKey, identity.publicKey)) throw new Error('کلید این دستگاه با پشتیبان فعلی یکسان نیست. ابتدا کلید را بازیابی کنید.');
+    } else {
+      identity = local;
+    }
+    if (identity) backup = await wrapForServer(identity, newPassword);
+  }
+  stopRetry();
+  await api.changePassword(currentPassword, newPassword, remote?.revision ?? 0, backup, secondFactor);
 };

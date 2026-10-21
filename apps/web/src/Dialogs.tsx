@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { startRegistration } from '@simplewebauthn/browser';
-import { api, type DeviceSession, type SecurityStatus, type User } from './api.js';
+import { api, ApiError, type DeviceSession, type SecurityStatus, type User } from './api.js';
 import { ChatIcon, ChevronIcon, CloseIcon, SearchIcon, ShieldIcon, UploadIcon } from './icons.js';
 import { Avatar } from './ui.js';
 import { fieldDir } from './chat/helpers.js';
@@ -10,6 +10,7 @@ import { DataSaverSettings } from './settings/DataSaver.js';
 import { WallpaperSettings } from './wallpaper/WallpaperSettings.js';
 import { MediaLibrary } from './media/MediaLibrary.js';
 import type { BackupPayload } from './backup/crypto.js';
+import { changePasswordAndBackup } from './backup/serverBackup.js';
 
 const isIpHost = (host: string): boolean => /^\d{1,3}(\.\d{1,3}){3}$/u.test(host) || host.includes(':') || host.startsWith('[');
 
@@ -99,13 +100,18 @@ export function NewChatDialog({ open, onClose, onCreated }: NewChatProps) {
   );
 }
 
-function SecuritySettings({ open }: { open: boolean }) {
+function SecuritySettings({ open, userId }: { open: boolean; userId: string }) {
   const [security, setSecurity] = useState<SecurityStatus>();
   const [sessions, setSessions] = useState<DeviceSession[]>([]);
   const [pendingSecret, setPendingSecret] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [notice, setNotice] = useState('');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordFactor, setPasswordFactor] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
 
   const refresh = useCallback(() => Promise.all([api.securityStatus(), api.sessions()])
     .then(([nextSecurity, nextSessions]) => { setSecurity(nextSecurity); setSessions(nextSessions); })
@@ -137,6 +143,24 @@ function SecuritySettings({ open }: { open: boolean }) {
     if (value) void api.deletePasskey(id, value.password, value.secondFactor).then(refresh).catch(() => setNotice('حذف کلید عبور انجام نشد.'));
   };
   const revoke = async (id: string) => { try { await api.revokeSession(id); setNotice('نشست حذف شد.'); await refresh(); } catch { setNotice('حذف نشست انجام نشد.'); } };
+  const changePassword = async (event: FormEvent) => {
+    event.preventDefault();
+    if (newPassword !== confirmPassword) { setNotice('تکرار رمز جدید یکسان نیست.'); return; }
+    if (newPassword.length < 12) { setNotice('رمز جدید باید حداقل ۱۲ نویسه باشد.'); return; }
+    setChangingPassword(true); setNotice('');
+    try {
+      await changePasswordAndBackup(userId, currentPassword, newPassword, passwordFactor || undefined);
+      setCurrentPassword(''); setNewPassword(''); setConfirmPassword(''); setPasswordFactor('');
+      setNotice('رمز عبور و پشتیبان کلید به‌روزرسانی شدند. نشست‌های دیگر خارج شدند.');
+      await refresh();
+    } catch (error) {
+      setNotice(error instanceof ApiError && error.status === 409
+        ? 'نسخهٔ پشتیبان در دستگاه دیگری تغییر کرده است. صفحه را تازه کنید و دوباره تلاش کنید.'
+        : error instanceof ApiError && error.status === 403
+          ? 'رمز فعلی یا کد دومرحله‌ای درست نیست.'
+          : error instanceof Error ? error.message : 'تغییر رمز انجام نشد. وضعیت پشتیبان کلید را بررسی کنید.');
+    } finally { setChangingPassword(false); }
+  };
 
   if (!open) return null;
   const ipHost = isIpHost(window.location.hostname);
@@ -162,6 +186,15 @@ function SecuritySettings({ open }: { open: boolean }) {
       {security?.passkeys.length ? (
         <ul className="list">{security.passkeys.map((passkey) => <li key={passkey.id}><span>{passkey.name}</span><button type="button" className="text-button" onClick={() => removePasskey(passkey.id)}>حذف</button></li>)}</ul>
       ) : null}
+      <form className="group__box" onSubmit={(event) => void changePassword(event)}>
+        <h4>تغییر رمز عبور</h4>
+        <p>در حالت خودکار، کلید همین حساب پیش از تغییر رمز با رمز جدید پشتیبان‌گیری می‌شود.</p>
+        <label className="field"><span>رمز فعلی</span><input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label>
+        <label className="field"><span>رمز جدید (حداقل ۱۲ نویسه)</span><input type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} minLength={12} required /></label>
+        <label className="field"><span>تکرار رمز جدید</span><input type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></label>
+        {security?.totpEnabled && <label className="field"><span>کد دومرحله‌ای یا بازیابی</span><input autoComplete="one-time-code" value={passwordFactor} onChange={(event) => setPasswordFactor(event.target.value)} required /></label>}
+        <button className="button button--primary" type="submit" disabled={changingPassword}>تغییر رمز</button>
+      </form>
       <h4>دستگاه‌های واردشده</h4>
       <ul className="list">
         {sessions.map((session) => (
@@ -213,7 +246,7 @@ export function SettingsDialog({ open, userId, getBackup, onImport, onClose }: S
         <h2>تنظیمات</h2>
       </div>
       <div className="sheet__scroll sheet__scroll--pad">
-        <SecuritySettings open={open} />
+        <SecuritySettings open={open} userId={userId} />
         <div className="group"><DataSaverSettings /></div>
         <div className="group"><WallpaperSettings /></div>
         <div className="group"><MediaLibrary /></div>

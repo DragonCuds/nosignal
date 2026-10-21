@@ -117,7 +117,7 @@ test('revoke-others and password change close every other session but keep the c
   // password change
   const ws2 = await openWs(await login('alice'));
   await sleep(200);
-  const pw = await call(keep, 'POST', '/api/security/password', { currentPassword: PW, newPassword: 'another long passphrase 42' });
+  const pw = await call(keep, 'POST', '/api/security/password', { currentPassword: PW, newPassword: 'another long passphrase 42', expectedBackupRevision: 0 });
   assert.equal(pw.status, 204);
   await sleep(400);
   assert.equal(ws2.closed, 4401);
