@@ -9,7 +9,7 @@ import type { FastifyInstance } from 'fastify';
 import { requireUser } from '../auth.js';
 import { config } from '../config.js';
 import { db } from '../db.js';
-import { commitStorage, releaseStorage, reserveChunkStorage, reserveStorage, StorageQuotaError, userStorageLimit } from '../storage-quota.js';
+import { commitChunkStorage, commitStorage, releaseStorage, reserveChunkStorage, reserveStorage, StorageQuotaError, userStorageLimit } from '../storage-quota.js';
 
 const CHUNK_SIZE = 262_144;
 const TAG_BYTES = 16;
@@ -100,7 +100,33 @@ export const cleanupAttachments = async (): Promise<{ orphans: number; expired: 
     }
   }
 
-  // Also reclaim a finalization claim abandoned by a crashed worker after two hours.
+  // A worker may crash after renaming a complete file but before committing its row.
+  // Recover that state before stale-upload cleanup releases the reserved bytes.
+  const interrupted = await db.query<{ id: string; chat_id: string; uploader_id: string; total_bytes: number }>(
+    `SELECT id, chat_id, uploader_id, total_bytes FROM attachment_uploads WHERE finalizing = 1
+       AND updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 hours')`
+  );
+  for (const upload of interrupted.rows) {
+    const total = Number(upload.total_bytes);
+    const committed = await db.query<{ chat_id: string; uploader_id: string; byte_size: number }>(
+      'SELECT chat_id, uploader_id, byte_size FROM attachments WHERE id = $1', [upload.id]);
+    if (committed.rowCount) {
+      const row = committed.rows[0];
+      if (row.chat_id === upload.chat_id && row.uploader_id === upload.uploader_id && Number(row.byte_size) === total) {
+        await db.query('DELETE FROM attachment_uploads WHERE id = $1', [upload.id]);
+      }
+      continue;
+    }
+    try {
+      if ((await stat(filePath(upload.id))).size !== total) continue;
+    } catch { continue; }
+    await commitChunkStorage(upload.id, total, async (client) => {
+      await client.query('INSERT INTO attachments (id, chat_id, uploader_id, byte_size) VALUES ($1, $2, $3, $4)',
+        [upload.id, upload.chat_id, upload.uploader_id, total]);
+    });
+  }
+
+  // Reclaim incomplete uploads and finalization claims with no completed file.
   const stale = await db.query(
     `DELETE FROM attachment_uploads WHERE
       (finalizing = 0 AND updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '${ORPHAN_GRACE}'))
@@ -162,13 +188,14 @@ export const registerAttachments = async (app: FastifyInstance): Promise<void> =
       if ((await db.query('SELECT 1 FROM attachments WHERE id = $1', [id])).rowCount) return fail(409, 'Upload id already used');
 
       let reservation: string;
-      try { reservation = await reserveStorage(userId, length); }
+      try { reservation = await reserveStorage(userId, length, id); }
       catch (error) {
         if (error instanceof StorageQuotaError) return fail(error.status, error.message);
         throw error;
       }
       const part = partPath(id);
       let received = 0;
+      let ownsPart = false;
       try {
         const counter = new Transform({
           transform(chunk: Buffer, _enc, cb) {
@@ -176,7 +203,9 @@ export const registerAttachments = async (app: FastifyInstance): Promise<void> =
             cb(received > length ? new Error('Body longer than Content-Length') : null, chunk);
           }
         });
-        await pipeline(request.body as Readable, counter, createWriteStream(part, { flags: 'wx', mode: 0o600 }));
+        const output = createWriteStream(part, { flags: 'wx', mode: 0o600 });
+        output.once('open', () => { ownsPart = true; });
+        await pipeline(request.body as Readable, counter, output);
         if (received !== length) throw new Error('Incomplete upload');
         try {
           await commitStorage(reservation, length, async (client) => {
@@ -191,7 +220,7 @@ export const registerAttachments = async (app: FastifyInstance): Promise<void> =
           throw error;
         }
       } catch (error) {
-        await rm(part, { force: true });
+        if (ownsPart) await rm(part, { force: true });
         if ((error as NodeJS.ErrnoException).code === 'EEXIST') return fail(409, 'Upload already in progress');
         request.log.warn({ err: error }, 'attachment upload failed');
         return fail(400, 'Upload failed');
@@ -309,19 +338,21 @@ export const registerAttachments = async (app: FastifyInstance): Promise<void> =
         return reply.code(200).send({ received, total: count, complete: ready });
       }
       const part = partPath(id);
+      const final = filePath(id);
+      let renamed = false;
       try {
         if ((await stat(part)).size !== total) throw new Error('Assembled size mismatch');
-        await db.query('INSERT INTO attachments (id, chat_id, uploader_id, byte_size) VALUES ($1, $2, $3, $4)', [id, chatId, userId, total]);
-        try { await rename(part, filePath(id)); } catch (error) {
-          await db.query('DELETE FROM attachments WHERE id = $1', [id]);
-          throw error;
-        }
+        await rename(part, final);
+        renamed = true;
+        await commitChunkStorage(id, total, async (client) => {
+          await client.query('INSERT INTO attachments (id, chat_id, uploader_id, byte_size) VALUES ($1, $2, $3, $4)', [id, chatId, userId, total]);
+        });
       } catch (error) {
         request.log.warn({ err: error }, 'attachment finalize failed');
+        if (renamed) await rename(final, part).catch(() => undefined);
         await db.query('UPDATE attachment_uploads SET finalizing = 0 WHERE id = $1', [id]);
         return fail(500, 'Upload failed');
       }
-      await db.query('DELETE FROM attachment_uploads WHERE id = $1', [id]);
       return done(201);
     });
   });
