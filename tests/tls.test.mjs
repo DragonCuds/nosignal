@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import https from 'node:https';
+import tls from 'node:tls';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
@@ -289,3 +290,125 @@ test('legacy CA without constraints is never replaced automatically; regenerateL
   assert.match(execFileSync('openssl', ['verify', '-CAfile', crt, out.files.crt]).toString(), /OK/);
   assert.equal(statSync(key).mode & 0o777, 0o600);
 });
+
+// ---------------------------------------------------------------------------
+// NS-11 isolated trust matrix. The only trust anchor is the project's own ca.crt, passed
+// explicitly (`openssl verify -CAfile`, node `tls` `ca`). Nothing is installed in any trust store.
+// ---------------------------------------------------------------------------
+
+const strictVerify = (caCrt, crt, extra = []) => {
+  try {
+    const out = execFileSync('openssl', ['verify', '-x509_strict', '-purpose', 'sslserver', '-no-CApath', '-no-CAstore',
+      '-CAfile', caCrt, ...extra, crt], { stdio: 'pipe' }).toString();
+    return { ok: /: OK/.test(out), out };
+  } catch (error) {
+    return { ok: false, out: `${error.stdout ?? ''}${error.stderr ?? ''}` };
+  }
+};
+
+const mintLeaf = (files, san) => signLeaf(files, san);
+
+/** Handshake with only `ca` as trust anchor; returns { authorized, error } for the chain (name match done separately). */
+const handshake = (crt, key, ca) => new Promise((resolve, reject) => {
+  const server = tls.createServer({ cert: readFileSync(crt), key: readFileSync(key) }, (s) => s.end());
+  server.listen(0, '127.0.0.1', () => {
+    const socket = tls.connect({ host: '127.0.0.1', port: server.address().port, ca, rejectUnauthorized: false,
+      servername: 'ns11.invalid', checkServerIdentity: () => undefined }, () => {
+      const result = { authorized: socket.authorized, error: socket.authorizationError };
+      socket.destroy(); server.close(); resolve(result);
+    });
+    socket.on('error', (e) => { server.close(); reject(e); });
+  });
+});
+
+const leafWithKey = (files, san) => {
+  const dir = tmp();
+  const key = path.join(dir, 'leaf.key');
+  const csr = path.join(dir, 'leaf.csr');
+  const ext = path.join(dir, 'leaf.cnf');
+  const crt = path.join(dir, 'leaf.crt');
+  writeFileSync(ext, `subjectAltName=${san}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n`);
+  execFileSync('openssl', ['ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', key]);
+  execFileSync('openssl', ['req', '-new', '-key', key, '-subj', '/CN=Test leaf', '-out', csr]);
+  execFileSync('openssl', ['x509', '-req', '-in', csr, '-CA', files.caCrt, '-CAkey', files.caKey,
+    '-CAcreateserial', '-CAserial', path.join(dir, 'serial'), '-days', '5', '-extfile', ext, '-out', crt], { stdio: 'ignore' });
+  return { crt, key };
+};
+
+// [CA hosts, accepted SAN values, rejected SAN values]
+const MATRIX = [
+  ['IP-only CA', ['192.0.2.7'],
+    ['IP:192.0.2.7'],
+    ['IP:8.8.8.8', 'IP:192.0.2.8', 'IP:::1', 'DNS:other.test', 'DNS:google.com', 'DNS:192.0.2.7.example.test',
+      'IP:192.0.2.7,DNS:other.test', 'DNS:other.test,IP:192.0.2.7']],
+  ['IPv6-only CA', ['::1'],
+    ['IP:::1'],
+    ['IP:::2', 'IP:127.0.0.1', 'DNS:localhost', 'IP:::1,DNS:other.test']],
+  ['DNS-only CA', ['example.test'],
+    ['DNS:example.test'],
+    ['DNS:other.test', 'DNS:google.com', 'DNS:child.example.test', 'DNS:example.test.evil.test', 'IP:8.8.8.8', 'IP:::1',
+      'DNS:example.test,IP:8.8.8.8', 'IP:8.8.8.8,DNS:example.test']],
+  ['DNS+IP CA', ['example.test', '192.0.2.7'],
+    ['DNS:example.test', 'IP:192.0.2.7', 'DNS:example.test,IP:192.0.2.7'],
+    ['DNS:other.test', 'DNS:child.example.test', 'IP:8.8.8.8', 'IP:::1',
+      'DNS:example.test,IP:8.8.8.8', 'IP:192.0.2.7,DNS:other.test']]
+];
+
+for (const [label, hosts, accepted, rejected] of MATRIX) {
+  test(`NS-11 matrix (${label}): -x509_strict and node tls with explicit ca only`, async () => {
+    const { files } = ensureLocalCertificate(tmp(), hosts);
+    const ca = readFileSync(files.caCrt);
+    // The CA's own leaf covers exactly the configured hosts.
+    assert.equal(strictVerify(files.caCrt, files.crt).ok, true, strictVerify(files.caCrt, files.crt).out);
+    for (const san of accepted) {
+      const leaf = leafWithKey(files, san);
+      const v = strictVerify(files.caCrt, leaf.crt);
+      assert.equal(v.ok, true, `${label} openssl should accept ${san}: ${v.out}`);
+      const h = await handshake(leaf.crt, leaf.key, ca);
+      assert.equal(h.authorized, true, `${label} node should accept ${san}: ${h.error}`);
+    }
+    for (const san of rejected) {
+      const leaf = leafWithKey(files, san);
+      const v = strictVerify(files.caCrt, leaf.crt);
+      assert.equal(v.ok, false, `${label} openssl must reject ${san}`);
+      assert.match(v.out, /subtree violation|verification failed/i, `${label} ${san}: ${v.out}`);
+      const h = await handshake(leaf.crt, leaf.key, ca);
+      assert.equal(h.authorized, false, `${label} node must reject ${san}`);
+      assert.ok(h.error, `${label} ${san}: node must report an authorization error`);
+    }
+  });
+
+  test(`NS-11 matrix (${label}): leaf renewed by scripts/renew-local-cert.mjs keeps the same limits`, async () => {
+    const dataDir = tmp();
+    const first = ensureLocalCertificate(dataDir, hosts);
+    const oldCa = readFileSync(first.files.caCrt);
+    const oldLeaf = readFileSync(first.files.crt);
+    const out = execFileSync(process.execPath, ['scripts/renew-local-cert.mjs', '--data-dir', dataDir, '--hosts', hosts.join(',')]).toString();
+    assert.match(out, /Server certificate renewed/);
+    assert.notDeepEqual(readFileSync(first.files.crt), oldLeaf);
+    assert.deepEqual(readFileSync(first.files.caCrt), oldCa, 'CA must not change on renewal');
+
+    // Renewed leaf: valid under the isolated anchor and exactly the configured SANs.
+    assert.equal(strictVerify(first.files.caCrt, first.files.crt).ok, true);
+    const renewed = new X509Certificate(readFileSync(first.files.crt));
+    const sans = renewed.subjectAltName.split(',').map((s) => s.trim()).sort();
+    const expected = hosts.map((h) => (h.includes(':') ? `IP Address:${h === '::1' ? '0:0:0:0:0:0:0:1' : h}` : /^\d/.test(h) ? `IP Address:${h}` : `DNS:${h}`)).sort();
+    assert.deepEqual(sans, expected);
+    assert.equal((await handshake(first.files.crt, first.files.key, oldCa)).authorized, true);
+
+    // The same limits still apply to anything signed after renewal.
+    for (const san of rejected) {
+      const leaf = leafWithKey(first.files, san);
+      assert.equal(strictVerify(first.files.caCrt, leaf.crt).ok, false, `after renewal: ${san}`);
+      assert.equal((await handshake(leaf.crt, leaf.key, oldCa)).authorized, false, `after renewal (node): ${san}`);
+    }
+
+    // Renewal for a host the CA does not permit fails closed and leaves files untouched.
+    const leafBefore = readFileSync(first.files.crt);
+    const extra = hosts.some((h) => !h.includes(':') && !/^\d/.test(h)) ? 'other.test' : 'dns-added.test';
+    assert.throws(() => execFileSync(process.execPath, ['scripts/renew-local-cert.mjs', '--data-dir', dataDir,
+      '--hosts', [...hosts, extra].join(',')], { stdio: 'pipe' }), /planned replacement/);
+    assert.deepEqual(readFileSync(first.files.crt), leafBefore);
+    assert.deepEqual(readFileSync(first.files.caCrt), oldCa);
+  });
+}

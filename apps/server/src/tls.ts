@@ -204,7 +204,9 @@ const makeServerCert = (f: TlsFiles, hosts: string[], days: number, previousOwne
       ''
     ].join('\n'));
     openssl(['ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', key]);
-    openssl(['req', '-new', '-key', key, '-subj', `/CN=${hosts[0]}`, '-out', csr]);
+    // Fixed, non-hostname CN: OpenSSL checks a hostname-looking CN (e.g. "192.0.2.7") against the CA's
+    // DNS constraints when the leaf has no DNS SAN, which would reject every IP-only certificate.
+    openssl(['req', '-new', '-key', key, '-subj', '/CN=Tel Messenger server', '-out', csr]);
     openssl([
       'x509', '-req', '-in', csr, '-CA', f.caCrt, '-CAkey', f.caKey, '-CAcreateserial',
       '-CAserial', join(tmp, 'ca.srl'), '-sha256', '-days', String(days), '-extfile', ext, '-out', crt
