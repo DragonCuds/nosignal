@@ -30,7 +30,9 @@ export function CreateGroupDialog({ open, onClose, onCreated }: Props) {
     try {
       const created = await groupsApi.create(name, members.map((member) => member.id));
       registerGroupChat(created.chatId, created.id);
-      await ensureGroupKeyed(created.chatId, created.id); // makes the first key and wraps it for every member
+      // The group already exists even if the initial key cannot be uploaded. Open it so the
+      // key-change banner can explain the block instead of creating a duplicate on retry.
+      await ensureGroupKeyed(created.chatId, created.id).catch(() => undefined);
       await onCreated(created.chatId);
       onClose();
     } catch { setError('ساخت گروه انجام نشد. دوباره تلاش کنید.'); } finally { setBusy(false); }

@@ -272,6 +272,22 @@ const verifyMembers = async (state: CryptoState): Promise<void> => {
   }
 };
 
+/** Check every recipient before creating any envelope. Pin first contacts only after all existing pins match. */
+const verifyRecipients = async (members: Array<{ userId: string; publicKey: JsonWebKey | null }>): Promise<Array<{ userId: string; publicKey: JsonWebKey; fingerprint: string }>> => {
+  if (!identity) throw new Error('Encryption identity is not initialized');
+  const checked: Array<{ userId: string; publicKey: JsonWebKey; fingerprint: string }> = [];
+  for (const member of members) {
+    if (!member.publicKey) throw new Error('یکی از اعضا هنوز رمزنگاری را راه‌اندازی نکرده است.');
+    const actual = await fingerprint(member.publicKey);
+    if (member.userId === identity.userId && actual !== identity.fingerprint) throw new Error('کلید رمزنگاری حساب شما با کلید سرور یکسان نیست.');
+    const pinned = await readPin(member.userId);
+    if (pinned && pinned !== actual) throw new KeyChangedError(member.userId, pinned, actual);
+    checked.push({ ...member, publicKey: member.publicKey, fingerprint: actual });
+  }
+  for (const member of checked) await pinMember(member.userId, member.fingerprint);
+  return checked;
+};
+
 // chat id -> channel id for chats of type "channel": their key is the server-held channel key, not a per-member envelope.
 const channelOfChat = new Map<string, string>();
 export const registerChannelChats = (chats: Array<{ id: string; type: string; channelId?: string }>): void => {
@@ -357,12 +373,12 @@ const groupKeyCandidates = async (chatId: string, version: number | undefined): 
 /** Wrap `raw` for every current member and upload it as `version`. */
 const uploadGroupKey = async (ctx: GroupCtx, detail: GroupDetail, version: number, raw: Uint8Array): Promise<void> => {
   if (!identity) throw new Error('Encryption identity is not initialized');
-  if (detail.members.some((member) => !member.publicKey)) throw new Error('یکی از اعضا هنوز رمزنگاری را راه‌اندازی نکرده است.');
-  const envelopes = await Promise.all(detail.members.map(async (member) => {
-    const wrapped = await wrapKey(groupScope(ctx.groupId, version), member.id, identity!.userId, member.publicKey!, raw);
-    return { userId: member.id, wrapped: wrapped.nonce + wrapped.ciphertext };
+  const recipients = await verifyRecipients(detail.members.map((member) => ({ userId: member.id, publicKey: member.publicKey })));
+  const envelopes = await Promise.all(recipients.map(async (member) => {
+    const wrapped = await wrapKey(groupScope(ctx.groupId, version), member.userId, identity!.userId, member.publicKey, raw);
+    return { userId: member.userId, wrapped: wrapped.nonce + wrapped.ciphertext };
   }));
-  await groupsApi.putKeys(ctx.groupId, version, envelopes);
+  await groupsApi.putKeys(ctx.groupId, version, recipients.map((member) => ({ userId: member.userId, fingerprint: member.fingerprint })), envelopes);
   ctx.raws.set(version, raw);
   ctx.keys.set(version, await crypto.subtle.importKey('raw', buffer(raw), 'AES-GCM', false, ['encrypt', 'decrypt']));
   ctx.latest = Math.max(ctx.latest, version);

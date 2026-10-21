@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CloseIcon, TrashIcon } from '../icons.js';
 import { Avatar } from '../ui.js';
-import { ensureGroupKeyed, forgetGroup, rotateGroupKey } from '../e2ee.js';
+import { ensureGroupKeyed, forgetGroup, KeyChangedError, rotateGroupKey } from '../e2ee.js';
 import { GroupAvatar } from './GroupIcon.js';
 import { PeoplePicker } from './PeoplePicker.js';
 import { groupsApi, type GroupDetail } from './groupsApi.js';
@@ -10,11 +10,6 @@ import './groups.css';
 type Props = { open: boolean; groupId: string; chatId: string; onClose: () => void; onChanged: () => void; onGone: () => void };
 
 const roleLabel = { owner: 'مالک', admin: 'مدیر', member: 'عضو' } as const;
-const randomEnvelope = (): string => {
-  const bytes = crypto.getRandomValues(new Uint8Array(48));
-  return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
-};
-
 export function GroupInfo({ open, groupId, chatId, onClose, onChanged, onGone }: Props) {
   const ref = useRef<HTMLDialogElement>(null);
   const [detail, setDetail] = useState<GroupDetail>();
@@ -32,19 +27,21 @@ export function GroupInfo({ open, groupId, chatId, onClose, onChanged, onGone }:
 
   const run = async (action: () => Promise<unknown>, fail: string, after?: () => void) => {
     setBusy(true); setNote('');
-    try { await action(); after?.(); } catch (error) { setNote((error as { status?: number; message?: string })?.status ? `${fail} (${(error as Error).message})` : fail); } finally { setBusy(false); }
+    try { await action(); after?.(); } catch (error) {
+      setNote(error instanceof KeyChangedError
+        ? `کلید رمزنگاری عضو تغییر کرده است. اثر انگشت جدید ${error.newFingerprint} را خارج از برنامه بررسی کنید و سپس در گفت‌وگو تأیید کنید.`
+        : (error as { status?: number; message?: string })?.status ? `${fail} (${(error as Error).message})` : fail);
+    } finally { setBusy(false); }
   };
 
   const owner = detail?.role === 'owner';
   const staff = owner || detail?.role === 'admin';
 
   const addMember = (user: { id: string; displayName: string }) => run(async () => {
-    // The server needs an envelope with the add request but we cannot wrap for someone whose key we have not
-    // seen yet; so the add carries a placeholder and we immediately start a NEW key version for everybody,
-    // which the newcomer receives properly. The newcomer therefore cannot read anything sent before.
-    await groupsApi.addMember(groupId, user.id, randomEnvelope());
-    await rotateGroupKey(chatId, groupId);
-    await load(); onChanged();
+    // Membership change suspends posting until a newly verified key covers the new roster.
+    await groupsApi.addMember(groupId, user.id);
+    try { await rotateGroupKey(chatId, groupId); }
+    finally { await load(); onChanged(); }
     setNote(`${user.displayName} اضافه شد؛ فقط پیام‌های بعدی را می‌خواند.`);
   }, 'افزودن عضو انجام نشد.');
 
@@ -52,8 +49,8 @@ export function GroupInfo({ open, groupId, chatId, onClose, onChanged, onGone }:
     if (!window.confirm(`${member.displayName} از گروه حذف شود؟`)) return;
     void run(async () => {
       await groupsApi.removeMember(groupId, member.id);
-      await ensureGroupKeyed(chatId, groupId); // new key for the remaining members
-      await load(); onChanged();
+      try { await ensureGroupKeyed(chatId, groupId); } // new key for the remaining members
+      finally { await load(); onChanged(); }
     }, 'حذف عضو انجام نشد.');
   };
   const setAdmin = (member: { id: string; role: string }) => run(() => member.role === 'admin' ? groupsApi.removeAdmin(groupId, member.id) : groupsApi.makeAdmin(groupId, member.id), 'تغییر نقش انجام نشد.', () => void load());

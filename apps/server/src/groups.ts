@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { db } from './db.js';
 import { notifyChatNew } from './realtime.js';
@@ -24,6 +25,7 @@ const parseWrapped = (value: unknown): string | null =>
   typeof value === 'string' && value.length >= 16 && value.length <= 2048 && /^[A-Za-z0-9_-]+$/.test(value) ? value : null;
 const parseVersion = (value: unknown): number | null =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= 1_000_000 ? value : null;
+const fingerprint = (jwk: JsonWebKey): string => createHash('sha256').update(`P-256:${jwk.x}:${jwk.y}`).digest('hex');
 
 type GroupRow = {
   id: string; chat_id: string; title: string; avatar_path: string | null; created_by: string;
@@ -104,6 +106,7 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
   app.post<{ Body: { title?: unknown; memberIds?: unknown; envelopes?: unknown } }>('/api/groups', { preHandler: app.requireUser, config: { rateLimit: WRITE } }, async (request, reply) => {
     const title = parseTitle(request.body?.title);
     if (!title) return reply.code(400).send({ error: 'title must be 1-80 characters' });
+    if (request.body?.envelopes !== undefined) return reply.code(400).send({ error: 'Upload keys after creating the group' });
     const userId = request.user!.id;
     const raw = request.body?.memberIds;
     if (!Array.isArray(raw) || raw.length > MAX_MEMBERS * 2) return reply.code(400).send({ error: 'memberIds must be an array of user ids' });
@@ -124,28 +127,17 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
     const owned = await db.query<{ n: number }>('SELECT count(*) AS n FROM group_members WHERE user_id = $1 AND role = \'owner\'', [userId]);
     if (Number(owned.rows[0].n) >= MAX_GROUPS_PER_OWNER) return reply.code(409).send({ error: 'Too many groups' });
 
-    // Optional: the creator's client may upload version-1 envelopes right away (must cover every member).
-    let envelopes: { userId: string; wrapped: string }[] | null = null;
-    if (request.body?.envelopes !== undefined) {
-      const parsed = parseEnvelopes(request.body.envelopes, all);
-      if (!parsed) return reply.code(400).send({ error: 'envelopes must contain one wrapped key for every member' });
-      envelopes = parsed;
-    }
-
     const client = await db.connect();
     try {
       await client.query('BEGIN');
       const chat = await client.query<{ id: string }>("INSERT INTO chats (type) VALUES ('direct') RETURNING id");
       const group = await client.query<{ id: string }>(
-        'INSERT INTO groups (chat_id, title, created_by, key_version, pending_version) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-        [chat.rows[0].id, title, userId, envelopes ? 1 : 0, envelopes ? null : 1]
+        'INSERT INTO groups (chat_id, title, created_by, key_version, pending_version) VALUES ($1, $2, $3, 0, 1) RETURNING id',
+        [chat.rows[0].id, title, userId]
       );
       for (const id of all) {
         await client.query('INSERT INTO chat_members (chat_id, user_id) VALUES ($1, $2)', [chat.rows[0].id, id]);
         await client.query('INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, $3)', [group.rows[0].id, id, id === userId ? 'owner' : 'member']);
-      }
-      for (const envelope of envelopes ?? []) {
-        await client.query('INSERT INTO group_key_envelopes (group_id, version, user_id, wrapped, wrapped_by) VALUES ($1, 1, $2, $3, $4)', [group.rows[0].id, envelope.userId, envelope.wrapped, userId]);
       }
       await client.query('COMMIT');
       notifyChatNew(app, all.filter((id) => id !== userId), chat.rows[0].id);
@@ -219,19 +211,27 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
     return reply.code(204).send();
   });
 
-  app.post<{ Params: { id: string }; Body: { userId?: unknown; envelope?: unknown } }>('/api/groups/:id/members', { preHandler: app.requireUser, config: { rateLimit: WRITE } }, async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: { userId?: unknown } }>('/api/groups/:id/members', { preHandler: app.requireUser, config: { rateLimit: WRITE } }, async (request, reply) => {
     const group = await mine(request.params.id, request.user!.id, reply);
     if (!group) return;
     if (!staff(group)) return reply.code(403).send({ error: 'Only owners and admins can add members' });
     const target = parseId(request.body?.userId);
-    const wrapped = parseWrapped(request.body?.envelope);
-    if (!target || !wrapped) return reply.code(400).send({ error: 'userId and envelope are required' });
+    if (!target) return reply.code(400).send({ error: 'userId is required' });
     if (group.key_version < 1 || group.pending_version !== null) return reply.code(409).send({ error: 'Group key rotation pending; upload the new key first' });
     if ((await db.query('SELECT 1 FROM users WHERE id = $1', [target])).rowCount !== 1) return reply.code(404).send({ error: 'User not found' });
     if (!(await identityOf(target))) return reply.code(409).send({ error: 'That user has no encryption identity yet' });
     const client = await db.connect();
     try {
       await client.query('BEGIN');
+      const fresh = (await client.query<{ key_version: number; pending_version: number | null; role: Role | null }>(
+        `SELECT g.key_version, g.pending_version, gm.role FROM groups g
+         LEFT JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = $2 WHERE g.id = $1`,
+        [group.id, request.user!.id]
+      )).rows[0];
+      if (!fresh || (fresh.role !== 'owner' && fresh.role !== 'admin') || fresh.key_version < 1 || fresh.pending_version !== null) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({ error: 'Group membership or key version changed; refresh and retry' });
+      }
       if ((await client.query('SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2', [group.id, target])).rowCount === 1) {
         await client.query('ROLLBACK');
         return reply.code(409).send({ error: 'Already a member' });
@@ -243,8 +243,8 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
       }
       await client.query("INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, 'member')", [group.id, target]);
       await client.query('INSERT OR IGNORE INTO chat_members (chat_id, user_id) VALUES ($1, $2)', [group.chat_id, target]);
-      // Only the CURRENT key version: the new member cannot read older messages.
-      await client.query('INSERT INTO group_key_envelopes (group_id, version, user_id, wrapped, wrapped_by) VALUES ($1, $2, $3, $4, $5)', [group.id, group.key_version, target, wrapped, request.user!.id]);
+      // No old key is given to the new member. Posting resumes after a verified rotation.
+      await client.query('UPDATE groups SET pending_version = key_version + 1 WHERE id = $1', [group.id]);
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK').catch(() => undefined);
@@ -294,7 +294,7 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
     return rows.rows.map((r) => ({ version: r.version, wrapped: r.wrapped, wrappedBy: r.wrapped_by }));
   });
 
-  app.put<{ Params: { id: string }; Body: { version?: unknown; envelopes?: unknown } }>('/api/groups/:id/keys', { preHandler: app.requireUser, config: { rateLimit: WRITE } }, async (request, reply) => {
+  app.put<{ Params: { id: string }; Body: { version?: unknown; expectedMembers?: unknown; envelopes?: unknown } }>('/api/groups/:id/keys', { preHandler: app.requireUser, config: { rateLimit: WRITE } }, async (request, reply) => {
     const group = await mine(request.params.id, request.user!.id, reply);
     if (!group) return;
     if (!staff(group)) return reply.code(403).send({ error: 'Only owners and admins can rotate the key' });
@@ -310,7 +310,20 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
         await client.query('ROLLBACK');
         return reply.code(409).send({ error: 'Wrong key version', keyVersion: current.key_version, pendingKeyVersion: current.pending_version });
       }
-      const members = (await client.query<{ user_id: string }>('SELECT user_id FROM group_members WHERE group_id = $1', [group.id])).rows.map((r) => r.user_id);
+      const currentMembers = (await client.query<{ user_id: string; public_jwk: JsonWebKey | null }>(
+        `SELECT gm.user_id, ci.public_jwk FROM group_members gm
+         LEFT JOIN user_crypto_identities ci ON ci.user_id = gm.user_id WHERE gm.group_id = $1`, [group.id]
+      )).rows;
+      const members = currentMembers.map((r) => r.user_id);
+      const expected = request.body?.expectedMembers;
+      if (!Array.isArray(expected) || expected.length !== members.length || expected.length > MAX_MEMBERS ||
+        expected.some((item) => !item || typeof item !== 'object' || !parseId(item.userId) ||
+          typeof item.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(item.fingerprint)) ||
+        new Set(expected.map((item) => item.userId)).size !== members.length ||
+        currentMembers.some((member) => !member.public_jwk || expected.find((item) => item.userId === member.user_id)?.fingerprint !== fingerprint(member.public_jwk))) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({ error: 'Group membership or identity changed; refresh and verify keys' });
+      }
       const envelopes = parseEnvelopes(request.body?.envelopes, members);
       if (!envelopes) {
         await client.query('ROLLBACK');

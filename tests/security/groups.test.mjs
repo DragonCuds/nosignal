@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { after, before, test } from 'node:test';
-import { randomUUID, randomBytes } from 'node:crypto';
+import { createHash, randomUUID, randomBytes } from 'node:crypto';
 
 const root = path.resolve(import.meta.dirname, '../..');
 const dist = process.env.SERVER_DIST ? path.resolve(process.env.SERVER_DIST) : path.join(root, 'apps/server/dist');
@@ -32,7 +32,16 @@ let app;
 const ids = {};
 const cookies = {};
 const cookieOf = (r) => r.headers['set-cookie'].split(';')[0];
-const send = (user, method, url, payload) => app.inject({ method, url, payload, remoteAddress: '10.0.0.1', headers: { origin, cookie: cookies[user] } });
+const send = async (user, method, url, payload) => {
+  if (method === 'PUT' && /\/api\/groups\/\d+\/keys$/.test(url) && payload && !payload.expectedMembers) {
+    const detail = await app.inject({ method: 'GET', url: url.replace(/\/keys$/, ''), headers: { origin, cookie: cookies[user] } });
+    if (detail.statusCode === 200) payload = { ...payload, expectedMembers: detail.json().members.map((member) => ({
+      userId: member.id,
+      fingerprint: createHash('sha256').update(`P-256:${member.publicKey.x}:${member.publicKey.y}`).digest('hex')
+    })) };
+  }
+  return app.inject({ method, url, payload, remoteAddress: '10.0.0.1', headers: { origin, cookie: cookies[user] } });
+};
 const b64 = (n) => randomBytes(n).toString('base64url');
 const enc = () => ({ version: 2, cipherId: randomUUID(), nonce: b64(12), ciphertext: b64(40) });
 const post = (user, chatId, keyVersion) => send(user, 'POST', `/api/chats/${chatId}/messages`, { kind: 'text', encrypted: enc(), keyVersion });
@@ -81,6 +90,7 @@ test('create group: validation, owner, list, keys', async () => {
   assert.equal((await send('owner', 'POST', '/api/groups', { title: 'G', memberIds: [] })).statusCode, 400);
   assert.equal((await send('owner', 'POST', '/api/groups', { title: 'G', memberIds: ['x'] })).statusCode, 400);
   assert.equal((await send('owner', 'POST', '/api/groups', { title: 'G', memberIds: [ids.noid] })).statusCode, 409); // no identity
+  assert.equal((await send('owner', 'POST', '/api/groups', { title: 'G', memberIds: [ids.bob], envelopes: envs('owner', 'bob') })).statusCode, 400);
   assert.equal((await send('owner', 'POST', '/api/groups', { title: 'G', memberIds: ['99999'] })).statusCode, 409);
   const created = await send('owner', 'POST', '/api/groups', { title: 'Friends', memberIds: [ids.bob, ids.adm, ids.bob] });
   assert.equal(created.statusCode, 201);
@@ -96,6 +106,13 @@ test('create group: validation, owner, list, keys', async () => {
   assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 3, envelopes: envs('owner', 'bob', 'adm') })).statusCode, 409);
   assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 1, envelopes: envs('owner', 'bob', 'adm') })).statusCode, 204);
   assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 1, envelopes: envs('owner', 'bob', 'adm') })).statusCode, 409); // already uploaded
+  const snapshot = (await send('owner', 'GET', `/api/groups/${state.id}`)).json().members.map((member) => ({
+    userId: member.id,
+    fingerprint: createHash('sha256').update(`P-256:${member.publicKey.x}:${member.publicKey.y}`).digest('hex')
+  }));
+  assert.equal((await app.inject({ method: 'PUT', url: `/api/groups/${state.id}/keys`, payload: { version: 2, envelopes: envs('owner', 'bob', 'adm') }, headers: { origin, cookie: cookies.owner } })).statusCode, 409);
+  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 2, expectedMembers: snapshot.map((member, index) => index === 0 ? { ...member, fingerprint: '0'.repeat(64) } : member), envelopes: envs('owner', 'bob', 'adm') })).statusCode, 409);
+  assert.deepEqual((await send('owner', 'GET', `/api/groups/${state.id}/keys?version=2`)).json(), []);
   const info = (await send('bob', 'GET', `/api/groups/${state.id}`)).json();
   assert.equal(info.role, 'member');
   assert.equal(info.keyVersion, 1);
@@ -150,27 +167,33 @@ test('messages: key version, post/edit/delete roles, key-version in payload', as
   assert.equal((await send('owner', 'PATCH', `/api/chats/${state.chatId}/messages/${state.msg}`, { encrypted: enc(), keyVersion: 1 })).statusCode, 404);
   assert.equal((await send('bob', 'PATCH', `/api/chats/${state.chatId}/messages/${state.msg}`, { encrypted: enc() })).statusCode, 400);
   assert.equal((await send('bob', 'PATCH', `/api/chats/${state.chatId}/messages/${state.msg}`, { encrypted: enc(), keyVersion: 1 })).statusCode, 200);
-  // delete: sender, or admin/owner; other plain members cannot
-  assert.equal((await send('owner', 'POST', `/api/groups/${state.id}/members`, { userId: ids.carol, envelope: wrap() })).statusCode, 204);
+  // Adding a member pauses posting until a new key is uploaded. No old envelope is issued.
+  assert.equal((await send('owner', 'POST', `/api/groups/${state.id}/members`, { userId: ids.carol })).statusCode, 204);
+  assert.equal((await post('carol', state.chatId, 1)).statusCode, 409);
+  assert.deepEqual((await send('carol', 'GET', `/api/groups/${state.id}/keys`)).json(), []);
+  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 2, envelopes: envs('owner', 'bob', 'adm', 'carol') })).statusCode, 204);
   assert.equal((await send('carol', 'DELETE', `/api/chats/${state.chatId}/messages/${state.msg}`)).statusCode, 404);
   assert.equal((await send('owner', 'POST', `/api/groups/${state.id}/admins/${ids.adm}`)).statusCode, 204);
   const del = await send('adm', 'DELETE', `/api/chats/${state.chatId}/messages/${state.msg}`);
   assert.equal(del.statusCode, 200);
   assert.ok(del.json().deletedAt);
-  const own = await post('carol', state.chatId, 1);
+  const own = await post('carol', state.chatId, 2);
   assert.equal(own.statusCode, 201);
   assert.equal((await send('carol', 'DELETE', `/api/chats/${state.chatId}/messages/${own.json().id}`)).statusCode, 200);
 });
 
-test('add member: roles, current key only, cap, duplicates, no identity', async () => {
+test('add member: roles, new key only, cap, duplicates, no identity', async () => {
   assert.equal((await send('bob', 'POST', `/api/groups/${state.id}/members`, { userId: ids.dave, envelope: wrap() })).statusCode, 403);
   assert.equal((await send('adm', 'POST', `/api/groups/${state.id}/members`, { userId: ids.carol, envelope: wrap() })).statusCode, 409); // already
   assert.equal((await send('adm', 'POST', `/api/groups/${state.id}/members`, { userId: ids.noid, envelope: wrap() })).statusCode, 409);
   assert.equal((await send('adm', 'POST', `/api/groups/${state.id}/members`, { userId: '99999', envelope: wrap() })).statusCode, 404);
-  assert.equal((await send('adm', 'POST', `/api/groups/${state.id}/members`, { userId: ids.dave })).statusCode, 400);
-  assert.equal((await send('adm', 'POST', `/api/groups/${state.id}/members`, { userId: ids.dave, envelope: wrap() })).statusCode, 204);
+  assert.equal((await send('adm', 'POST', `/api/groups/${state.id}/members`, {})).statusCode, 400);
+  assert.equal((await send('adm', 'POST', `/api/groups/${state.id}/members`, { userId: ids.dave })).statusCode, 204);
+  assert.equal((await send('owner', 'GET', `/api/groups/${state.id}`)).json().pendingKeyVersion, 3);
+  assert.deepEqual((await send('dave', 'GET', `/api/groups/${state.id}/keys`)).json(), []);
+  assert.equal((await send('adm', 'PUT', `/api/groups/${state.id}/keys`, { version: 3, envelopes: envs('owner', 'bob', 'adm', 'carol', 'dave') })).statusCode, 204);
   const keys = (await send('dave', 'GET', `/api/groups/${state.id}/keys`)).json();
-  assert.deepEqual(keys.map((k) => k.version), [1]);
+  assert.deepEqual(keys.map((k) => k.version), [3]);
   assert.equal(keys[0].wrappedBy, ids.adm);
   assert.equal((await send('dave', 'GET', `/api/groups/${state.id}`)).json().memberCount, 5);
 });
@@ -185,8 +208,8 @@ test('remove / leave bump rotation; rotation rules', async () => {
   // admin removes bob
   assert.equal((await send('adm', 'DELETE', `/api/groups/${state.id}/members/${ids.bob}`)).statusCode, 204);
   let info = (await send('owner', 'GET', `/api/groups/${state.id}`)).json();
-  assert.equal(info.keyVersion, 1);
-  assert.equal(info.pendingKeyVersion, 2);
+  assert.equal(info.keyVersion, 3);
+  assert.equal(info.pendingKeyVersion, 4);
   assert.equal(info.memberCount, 4);
   // removed member is out everywhere
   for (const [m, u, b] of [['GET', `/api/groups/${state.id}`], ['GET', `/api/groups/${state.id}/keys`], ['GET', `/api/chats/${state.chatId}/messages`], ['POST', `/api/chats/${state.chatId}/messages`, { kind: 'text', encrypted: enc(), keyVersion: 1 }]]) {
@@ -194,34 +217,34 @@ test('remove / leave bump rotation; rotation rules', async () => {
   }
   assert.equal((await send('bob', 'GET', '/api/chats')).json().some((c) => c.id === state.chatId), false);
   // posting / adding blocked while the rotation is pending
-  assert.equal((await post('carol', state.chatId, 1)).statusCode, 409);
-  assert.equal((await post('carol', state.chatId, 2)).statusCode, 409);
+  assert.equal((await post('carol', state.chatId, 3)).statusCode, 409);
+  assert.equal((await post('carol', state.chatId, 4)).statusCode, 409);
   assert.equal((await send('owner', 'POST', `/api/groups/${state.id}/members`, { userId: ids.bob, envelope: wrap() })).statusCode, 409);
   // members cannot rotate; wrong versions / incomplete coverage rejected
-  assert.equal((await send('carol', 'PUT', `/api/groups/${state.id}/keys`, { version: 2, envelopes: envs('owner', 'adm', 'carol', 'dave') })).statusCode, 403);
-  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 3, envelopes: envs('owner', 'adm', 'carol', 'dave') })).statusCode, 409);
-  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 2, envelopes: envs('owner', 'adm', 'carol', 'bob') })).statusCode, 400); // removed member
-  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 2, envelopes: envs('owner', 'adm', 'carol') })).statusCode, 400);
-  assert.equal((await send('adm', 'PUT', `/api/groups/${state.id}/keys`, { version: 2, envelopes: envs('owner', 'adm', 'carol', 'dave') })).statusCode, 204);
+  assert.equal((await send('carol', 'PUT', `/api/groups/${state.id}/keys`, { version: 4, envelopes: envs('owner', 'adm', 'carol', 'dave') })).statusCode, 403);
+  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 5, envelopes: envs('owner', 'adm', 'carol', 'dave') })).statusCode, 409);
+  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 4, envelopes: envs('owner', 'adm', 'carol', 'bob') })).statusCode, 400); // removed member
+  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 4, envelopes: envs('owner', 'adm', 'carol') })).statusCode, 400);
+  assert.equal((await send('adm', 'PUT', `/api/groups/${state.id}/keys`, { version: 4, envelopes: envs('owner', 'adm', 'carol', 'dave') })).statusCode, 204);
   info = (await send('owner', 'GET', `/api/groups/${state.id}`)).json();
-  assert.equal(info.keyVersion, 2);
+  assert.equal(info.keyVersion, 4);
   assert.equal(info.pendingKeyVersion, null);
-  assert.equal((await post('carol', state.chatId, 1)).statusCode, 400);
-  assert.equal((await post('carol', state.chatId, 2)).statusCode, 201);
-  assert.deepEqual((await send('carol', 'GET', `/api/groups/${state.id}/keys`)).json().map((k) => k.version), [1, 2]);
-  assert.equal((await send('carol', 'GET', `/api/groups/${state.id}/keys?version=latest`)).json()[0].version, 2);
+  assert.equal((await post('carol', state.chatId, 3)).statusCode, 400);
+  assert.equal((await post('carol', state.chatId, 4)).statusCode, 201);
+  assert.deepEqual((await send('carol', 'GET', `/api/groups/${state.id}/keys`)).json().map((k) => k.version), [2, 3, 4]);
+  assert.equal((await send('carol', 'GET', `/api/groups/${state.id}/keys?version=latest`)).json()[0].version, 4);
   // a voluntary rotation is allowed too (version = keyVersion + 1)
-  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 3, envelopes: envs('owner', 'adm', 'carol', 'dave') })).statusCode, 204);
+  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 5, envelopes: envs('owner', 'adm', 'carol', 'dave') })).statusCode, 204);
   // leave: member leaves -> pending again; owner cannot leave
   assert.equal((await send('dave', 'POST', `/api/groups/${state.id}/leave`)).statusCode, 204);
-  assert.equal((await send('owner', 'GET', `/api/groups/${state.id}`)).json().pendingKeyVersion, 4);
+  assert.equal((await send('owner', 'GET', `/api/groups/${state.id}`)).json().pendingKeyVersion, 6);
   assert.equal((await send('dave', 'GET', `/api/groups/${state.id}`)).statusCode, 404);
   assert.equal((await send('owner', 'POST', `/api/groups/${state.id}/leave`)).statusCode, 409);
   assert.equal((await send('owner', 'DELETE', `/api/groups/${state.id}/members/${ids.owner}`)).statusCode, 409);
   // a second removal keeps the same pending version
   assert.equal((await send('owner', 'DELETE', `/api/groups/${state.id}/members/${ids.carol}`)).statusCode, 204);
-  assert.equal((await send('owner', 'GET', `/api/groups/${state.id}`)).json().pendingKeyVersion, 4);
-  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 4, envelopes: envs('owner', 'adm') })).statusCode, 204);
+  assert.equal((await send('owner', 'GET', `/api/groups/${state.id}`)).json().pendingKeyVersion, 6);
+  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 6, envelopes: envs('owner', 'adm') })).statusCode, 204);
 });
 
 test('transfer ownership, rename, admins', async () => {
@@ -238,7 +261,8 @@ test('transfer ownership, rename, admins', async () => {
 });
 
 test('non-member gets 404 on every route', async () => {
-  const c = (await send('adm', 'POST', '/api/groups', { title: 'Priv', memberIds: [ids.bob], envelopes: envs('adm', 'bob') })).json();
+  const c = (await send('adm', 'POST', '/api/groups', { title: 'Priv', memberIds: [ids.bob] })).json();
+  assert.equal((await send('adm', 'PUT', `/api/groups/${c.id}/keys`, { version: 1, envelopes: envs('adm', 'bob') })).statusCode, 204);
   assert.equal((await send('adm', 'GET', `/api/groups/${c.id}`)).json().keyVersion, 1);
   const m = (await post('adm', c.chatId, 1)).json();
   const checks = [
@@ -272,8 +296,9 @@ test('member cap is 100', async () => {
     extra.push(String(uid));
   }
   assert.equal((await send('owner', 'POST', '/api/groups', { title: 'Big', memberIds: extra })).statusCode, 409); // 101 incl. creator
-  const ok = await send('owner', 'POST', '/api/groups', { title: 'Big', memberIds: extra.slice(0, 98), envelopes: [{ userId: ids.owner, wrapped: wrap() }, ...extra.slice(0, 98).map((userId) => ({ userId, wrapped: wrap() }))] });
+  const ok = await send('owner', 'POST', '/api/groups', { title: 'Big', memberIds: extra.slice(0, 98) });
   assert.equal(ok.statusCode, 201); // 99 members
+  assert.equal((await send('owner', 'PUT', `/api/groups/${ok.json().id}/keys`, { version: 1, envelopes: [{ userId: ids.owner, wrapped: wrap() }, ...extra.slice(0, 98).map((userId) => ({ userId, wrapped: wrap() }))] })).statusCode, 204);
   assert.equal((await send('owner', 'POST', `/api/groups/${ok.json().id}/members`, { userId: extra[98], envelope: wrap() })).statusCode, 204); // 100
   assert.equal((await send('owner', 'POST', `/api/groups/${ok.json().id}/members`, { userId: extra[99], envelope: wrap() })).statusCode, 409); // 101
 });

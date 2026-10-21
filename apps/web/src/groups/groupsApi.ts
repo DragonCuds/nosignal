@@ -31,11 +31,11 @@ export const groupsApi = {
   rename: (id: string, title: string) => call<void>(`/api/groups/${enc(id)}`, json('PATCH', { title })),
   remove: (id: string) => call<void>(`/api/groups/${enc(id)}`, json('DELETE')),
   leave: (id: string) => call<void>(`/api/groups/${enc(id)}/leave`, json('POST')),
-  addMember: (id: string, userId: string, envelope: string) => call<void>(`/api/groups/${enc(id)}/members`, json('POST', { userId, envelope })),
+  addMember: (id: string, userId: string) => call<void>(`/api/groups/${enc(id)}/members`, json('POST', { userId })),
   removeMember: (id: string, userId: string) => call<void>(`/api/groups/${enc(id)}/members/${enc(userId)}`, json('DELETE')),
   makeAdmin: (id: string, userId: string) => call<void>(`/api/groups/${enc(id)}/admins/${enc(userId)}`, json('POST')),
   removeAdmin: (id: string, userId: string) => call<void>(`/api/groups/${enc(id)}/admins/${enc(userId)}`, json('DELETE')),
   transfer: (id: string, userId: string) => call<void>(`/api/groups/${enc(id)}/owner/${enc(userId)}`, json('POST')),
   keys: (id: string, version: number | 'latest') => call<GroupKeyEntry[]>(`/api/groups/${enc(id)}/keys?version=${version}`),
-  putKeys: (id: string, version: number, envelopes: Array<{ userId: string; wrapped: string }>) => call<void>(`/api/groups/${enc(id)}/keys`, json('PUT', { version, envelopes })),
+  putKeys: (id: string, version: number, expectedMembers: Array<{ userId: string; fingerprint: string }>, envelopes: Array<{ userId: string; wrapped: string }>) => call<void>(`/api/groups/${enc(id)}/keys`, json('PUT', { version, expectedMembers, envelopes })),
 };
