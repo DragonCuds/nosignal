@@ -2,6 +2,7 @@
 // so a reload or a dead link never loses a message. Same clientMsgId on every retry = the server dedupes (C1).
 import { api, ApiError, type Message, type OutboundEncryptedPayload, type StickerMessagePayload, type GifMessagePayload } from './api.js';
 import { db, safe, type OutboxRow } from './db.js';
+import { isStaleKeyError } from './keyErrors.js';
 
 export type { OutboxRow } from './db.js';
 export type EnqueueInput = Omit<OutboxRow, 'state' | 'attempts' | 'nextAttemptAt' | 'createdAt'> & { createdAt?: number };
@@ -48,6 +49,21 @@ export const planFlush = (rows: readonly OutboxRow[], now: number): { ready: Out
 
 /** Test hook: pure helpers, no browser needed. */
 export const outboxLogic = { backoffMs, isRetryable, planFlush };
+
+/**
+ * The server refused a queued message because its chat key version is stale (a contact started fresh, or the tab is old).
+ * Text can be sealed again with the current version while its plaintext is still in memory; the callback does that or throws
+ * an Error whose message says what the user should do. Stickers/GIFs/media were sealed under the old version together with
+ * their uploaded file, so they fail with a clear message instead. Nothing is dropped silently.
+ */
+export type StaleKeyRecovery = (row: OutboxRow) => Promise<OutboundEncryptedPayload>;
+const STALE_KEY_TEXT = 'کلید گفت‌وگو عوض شده است؛ این پیام را دوباره بفرستید.';
+const MAX_REKEYS = 2;
+let staleRecovery: StaleKeyRecovery | undefined;
+export const setStaleKeyRecovery = (fn: StaleKeyRecovery | undefined): (() => void) => {
+  staleRecovery = fn;
+  return () => { if (staleRecovery === fn) staleRecovery = undefined; };
+};
 
 const mem = new Map<string, OutboxRow>();
 const inflight = new Set<string>(); // chat ids with a send in progress
@@ -100,7 +116,18 @@ const run = async (row: OutboxRow) => {
     for (const cb of sentListeners) { try { cb(sent, message); } catch { /* ignore */ } }
   } catch (error) {
     const attempts = row.attempts + 1;
-    const text = error instanceof Error ? error.message : 'ارسال ناموفق بود.';
+    let text = error instanceof Error ? error.message : 'ارسال ناموفق بود.';
+    if (isStaleKeyError(error)) {
+      if (row.kind === 'text' && staleRecovery && (row.rekeys ?? 0) < MAX_REKEYS) {
+        try {
+          const encrypted = await staleRecovery(row);
+          update(row.clientMsgId, { encrypted, state: 'pending', nextAttemptAt: 0, error: undefined, rekeys: (row.rekeys ?? 0) + 1 });
+          return; // the flush in `finally` sends it again right away
+        } catch (caught) { text = caught instanceof Error && caught.message ? caught.message : STALE_KEY_TEXT; }
+      } else text = STALE_KEY_TEXT;
+      update(row.clientMsgId, { state: 'failed', attempts, error: text });
+      return;
+    }
     if (isRetryable(error)) update(row.clientMsgId, { state: 'pending', attempts, nextAttemptAt: Date.now() + backoffMs(attempts), error: text });
     else update(row.clientMsgId, { state: 'failed', attempts, error: text });
   } finally {
@@ -134,7 +161,7 @@ export const retryNow = (clientMsgId?: string): void => {
   for (const row of [...mem.values()]) {
     if (clientMsgId && row.clientMsgId !== clientMsgId) continue;
     if (row.state === 'sending') continue;
-    update(row.clientMsgId, { state: 'pending', attempts: row.state === 'failed' ? 0 : row.attempts, nextAttemptAt: 0, error: undefined });
+    update(row.clientMsgId, { state: 'pending', attempts: row.state === 'failed' ? 0 : row.attempts, nextAttemptAt: 0, error: undefined, rekeys: 0 });
   }
   flush();
 };

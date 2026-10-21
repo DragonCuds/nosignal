@@ -15,7 +15,9 @@ try {
   run.check('A reads B', await waitFor(A, 'جواب از B'));
 
   // B's identity is reset on the server, then B starts fresh in a new browser
-  const reset = await apiJson(B, '/api/crypto/identity/reset', 'POST', { password: PASS });
+  const rev = (await apiJson(B, '/api/crypto/backup')).body.revision;
+  const grant = await apiJson(B, '/api/crypto/action-grant', 'POST', { action: 'identity.reset', expectedRevision: rev, password: PASS });
+  const reset = await apiJson(B, '/api/crypto/identity/reset', 'POST', { expectedRevision: rev, actionToken: grant.body?.token });
   run.check('server accepted identity reset', reset.status === 204 || reset.status === 200, String(reset.status));
   const B2 = await fresh(browser, 'B2', 1000, 800); await goto(B2, BASE); await login(B2, NB);
   // the server forgot B's identity (what «شروع تازه» does): this browser has no key, so a new one is generated at login
@@ -42,9 +44,15 @@ try {
   run.check('banner returns after reload (nothing was re-pinned)', await waitFor(A, 'تأیید کلید جدید', 15000));
   await clickText(A, '.keychange button', 'تأیید کلید جدید');
   run.check('after accepting, the new message decrypts', await waitFor(A, 'پیام جدید از B', 15000));
+  // NS-07: the history B created under his OLD key stays readable for A (A keeps B's earlier fingerprint in the pin history)
+  const history = await text(A);
+  run.check('after accepting, A still reads both old messages', history.includes('سلام از A') && history.includes('جواب از B') && !history.includes('قابل رمزگشایی نیست'));
   run.check('banner is gone', (await A.$('.keychange')) === null);
   await send(A, 'بعد از تایید');
   run.check('B2 reads A after acceptance', await waitFor(B2, 'بعد از تایید', 15000));
+  // B2 started fresh: what was sent before is not readable for B2, the new messages are
+  const b2text = await text(B2);
+  run.check('B2 does not read the old messages but reads the new ones', !b2text.includes('سلام از A') && b2text.includes('پیام جدید از B') && b2text.includes('بعد از تایید'));
   await A.screenshot({ path: run.shots + '/A-accepted-360.png' });
 } catch (e) { console.log('ERROR', e); run.fail(); }
 finally { await browser.close(); }

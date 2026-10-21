@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { after, before, test } from 'node:test';
-import { randomUUID, randomBytes } from 'node:crypto';
+import { createHash, randomUUID, randomBytes } from 'node:crypto';
 
 const root = path.resolve(import.meta.dirname, '../..');
 const dist = process.env.SERVER_DIST ? path.resolve(process.env.SERVER_DIST) : path.join(root, 'apps/server/dist');
@@ -99,18 +99,25 @@ test('GET /api/chats lists it as type saved with no peer, direct chats keep thei
 });
 
 test('key envelope: a single envelope to itself for the saved chat', async () => {
-  assert.equal((await send('alice', 'PUT', '/api/crypto/identity', { expectedUserId: ids.alice, publicKey: jwk() })).statusCode, 200);
-  const env = { recipientId: ids.alice, version: 1, nonce: b64(12), ciphertext: b64(48) };
-  assert.equal((await send('alice', 'POST', `/api/chats/${savedId}/crypto/envelopes`, { envelopes: [env, env] })).statusCode, 400);
-  assert.equal((await send('alice', 'POST', `/api/chats/${savedId}/crypto/envelopes`, { envelopes: [{ ...env, recipientId: ids.bob }] })).statusCode, 400);
-  assert.equal((await send('alice', 'POST', `/api/chats/${savedId}/crypto/envelopes`, { envelopes: [env] })).statusCode, 201);
+  const identity = jwk();
+  const fp = createHash('sha256').update(`P-256:${identity.x}:${identity.y}`).digest('hex');
+  assert.equal((await send('alice', 'PUT', '/api/crypto/identity', { expectedUserId: ids.alice, publicKey: identity })).statusCode, 200);
+  const env = { recipientId: ids.alice, recipientFingerprint: fp, nonce: b64(12), ciphertext: b64(48) };
+  const body = (envelopes, extra = {}) => ({ version: 1, senderFingerprint: fp, envelopes, ...extra });
+  assert.equal((await send('alice', 'POST', `/api/chats/${savedId}/crypto/envelopes`, body([env, env]))).statusCode, 400);
+  assert.equal((await send('alice', 'POST', `/api/chats/${savedId}/crypto/envelopes`, body([{ ...env, recipientId: ids.bob }]))).statusCode, 400);
+  assert.equal((await send('alice', 'POST', `/api/chats/${savedId}/crypto/envelopes`, { envelopes: [env] })).statusCode, 400, 'version and sender fingerprint are required');
+  assert.equal((await send('alice', 'POST', `/api/chats/${savedId}/crypto/envelopes`, body([env]))).statusCode, 201);
   const state = (await send('alice', 'GET', `/api/chats/${savedId}/crypto`)).json();
   assert.equal(state.members.length, 1);
   assert.equal(state.envelope.senderId, ids.alice);
+  assert.equal(state.keyVersion, 1);
+  assert.equal(state.envelopes[0].senderFingerprint, fp);
 });
 
 test('messages: send, dedupe, edit, delete, attachment kind, read, sync (single member)', async () => {
-  const body = { kind: 'text', encrypted: enc(), clientMsgId: 'client-msg-0001' };
+  const body = { kind: 'text', encrypted: enc(), keyVersion: 1, clientMsgId: 'client-msg-0001' };
+  assert.equal((await send('alice', 'POST', `/api/chats/${savedId}/messages`, { ...body, keyVersion: undefined, clientMsgId: 'client-msg-0000' })).statusCode, 400, 'the key version is required once the chat has a key');
   const sent = await send('alice', 'POST', `/api/chats/${savedId}/messages`, body);
   assert.equal(sent.statusCode, 201, sent.body);
   const msg = sent.json();
@@ -119,14 +126,14 @@ test('messages: send, dedupe, edit, delete, attachment kind, read, sync (single 
   assert.ok(events.some((e) => e.chatId === savedId && e.event.type === 'message.new'));
   assert.equal((await send('bob', 'POST', `/api/chats/${savedId}/messages`, { ...body, clientMsgId: 'client-msg-0002', encrypted: enc() })).statusCode, 404);
 
-  const edited = await send('alice', 'PATCH', `/api/chats/${savedId}/messages/${msg.id}`, { encrypted: enc() });
+  const edited = await send('alice', 'PATCH', `/api/chats/${savedId}/messages/${msg.id}`, { encrypted: enc(), keyVersion: 1 });
   assert.equal(edited.statusCode, 200);
   assert.ok(edited.json().editedAt);
 
   // a photo message through an E2EE attachment row
   const attId = randomBytes(16).toString('hex');
   await db.query('INSERT INTO attachments (id, chat_id, uploader_id, byte_size) VALUES ($1, $2, $3, 64)', [attId, savedId, ids.alice]);
-  const photo = await send('alice', 'POST', `/api/chats/${savedId}/messages`, { kind: 'photo', attachmentId: attId, encrypted: enc() });
+  const photo = await send('alice', 'POST', `/api/chats/${savedId}/messages`, { kind: 'photo', attachmentId: attId, encrypted: enc(), keyVersion: 1 });
   assert.equal(photo.statusCode, 201, photo.body);
   assert.equal(photo.json().attachmentId, attId);
 

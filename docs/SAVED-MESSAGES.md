@@ -2,7 +2,7 @@
 
 Decision (3 lines):
 1. A saved chat is an ordinary chat with ONE member (the owner), marked by a row in `saved_chats(user_id PK, chat_id UNIQUE)`. The `chats.type` column stays `'direct'` (no table rebuild: it would cascade-delete data inside the migration transaction); the API reports `type: "saved"`. DB triggers make sure nobody else can ever join it.
-2. E2EE is unchanged: the client creates the chat key and wraps it to ITS OWN public key. `POST /api/chats/:id/crypto/envelopes` takes exactly ONE envelope (`recipientId` = own id) for a saved chat and two for a direct chat. `GET /api/chats/:id/crypto` returns `members` with only the owner, so the web's existing `establishKey`/`unwrapKey` work as they are.
+2. E2EE is unchanged in kind: the client creates the chat key and wraps it to ITS OWN public key. `POST /api/chats/:id/crypto/envelopes` takes `{version, senderFingerprint, envelopes}` (NS-07: numbered chat-key versions; each envelope also names `recipientFingerprint`) with exactly ONE envelope (`recipientId` = own id) for a saved chat and two for a direct chat. `GET /api/chats/:id/crypto` returns `members` with only the owner, plus `keyVersion`, `pendingKeyVersion` and the caller's `envelopes`. After "start fresh" the old notes are unreadable (the only envelope was the owner's own) and the next key version holds new notes.
 3. Messages, attachments, edit, delete, read, realtime and `/api/sync` already only check `chat_members`, so they work for a single member without any change.
 
 ## JSON shapes
@@ -31,4 +31,4 @@ Rules: leading `@` is stripped, text is lowercased, fewer than 3 characters or c
 Messages in the saved chat use the same routes as any chat: `POST/GET /api/chats/12/messages`, `PATCH|DELETE /api/chats/12/messages/:id`, `POST /api/chats/12/read`, attachments under `/api/chats/12/attachments`.
 Message objects are identical; `sender` is always the owner. Realtime events (`message.new` etc.) arrive for the owner as usual.
 
-Web flow: tap «پیام‌های ذخیره‌شده» -> `POST /api/chats/saved` -> open chat `id` -> `GET /api/chats/:id/crypto`; if `envelope` is null, wrap the chat key to your own public key (one envelope, `recipientId` = your id) and POST it.
+Web flow: tap «پیام‌های ذخیره‌شده» -> `POST /api/chats/saved` -> open chat `id` -> `GET /api/chats/:id/crypto`; if `keyVersion` is 0 or `pendingKeyVersion` is set, wrap a new chat key to your own public key (one envelope, `recipientId` = your id, `version` = `pendingKeyVersion ?? 1`) and POST it with your fingerprint.

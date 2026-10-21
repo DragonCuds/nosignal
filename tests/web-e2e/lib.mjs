@@ -8,7 +8,7 @@ export const tag = () => Math.random().toString(36).slice(2, 7);
 
 export const makeRun = (name) => {
   let failures = 0;
-  const shots = `/root/tel-dev/shots/${name}`;
+  const shots = `${process.env.SHOTS_DIR ?? '/root/tel-dev/shots'}/${name}`;
   mkdirSync(shots, { recursive: true });
   return {
     shots,

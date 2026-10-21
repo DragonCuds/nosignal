@@ -3,7 +3,8 @@ import { db } from './db.js';
 import { parseEncryptedMessageV2, type EncryptedMessageV2 } from './encrypted-message.js';
 import { recordEvent, registerSync } from './sync.js';
 import { ensureCanPost, registerChannelRoutes } from './channels.js';
-import { groupMessageGate, registerGroupRoutes } from './groups.js';
+import { registerGroupRoutes } from './groups.js';
+import { messageKeyGate } from './chatKeys.js';
 import { notifyChatNew } from './realtime.js';
 
 const MESSAGE_KINDS = ['text', 'sticker', 'gif', 'photo', 'video', 'voice', 'file'] as const;
@@ -437,7 +438,7 @@ export const registerChatRoutes = async (app: FastifyInstance): Promise<void> =>
     if (!(await ensureCanPost(chatId, request.user!.id, reply))) return;
     const incoming = parseIncomingMessage(request.body);
     if ('error' in incoming) return reply.code(400).send({ error: incoming.error });
-    const gate = await groupMessageGate(chatId, request.user!.id, 'post', isPlainObject(request.body) ? request.body.keyVersion : undefined, reply);
+    const gate = await messageKeyGate(chatId, request.user!.id, 'post', isPlainObject(request.body) ? request.body.keyVersion : undefined, reply);
     if (!gate.ok) return;
     if (incoming.encryptedMediaId) {
       const media = await db.query(
@@ -534,7 +535,7 @@ export const registerChatRoutes = async (app: FastifyInstance): Promise<void> =>
       if (!chatId || !messageId || !encrypted) return reply.code(400).send({ error: 'Invalid chat id, message id, or encrypted content' });
       if (!(await ensureChatMember(chatId, request.user!.id, reply))) return;
       if (!(await ensureCanPost(chatId, request.user!.id, reply))) return;
-      const gate = await groupMessageGate(chatId, request.user!.id, 'edit', isPlainObject(request.body) ? request.body.keyVersion : undefined, reply);
+      const gate = await messageKeyGate(chatId, request.user!.id, 'edit', isPlainObject(request.body) ? request.body.keyVersion : undefined, reply);
       if (!gate.ok) return;
       const client = await db.connect();
       let updated: { id: string } | undefined;
@@ -575,7 +576,7 @@ export const registerChatRoutes = async (app: FastifyInstance): Promise<void> =>
       if (!chatId || !messageId) return reply.code(400).send({ error: 'Invalid chat id or message id' });
       if (!(await ensureChatMember(chatId, request.user!.id, reply))) return;
       if (!(await ensureCanPost(chatId, request.user!.id, reply))) return;
-      const gate = await groupMessageGate(chatId, request.user!.id, 'delete', undefined, reply);
+      const gate = await messageKeyGate(chatId, request.user!.id, 'delete', undefined, reply);
       if (!gate.ok) return;
       const client = await db.connect();
       let deleted: { id: string } | undefined;

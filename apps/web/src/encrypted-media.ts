@@ -1,6 +1,6 @@
 import { getCachedMedia, putCachedMedia } from './mediaCache.js';
 import { api, type Message, type OutboundEncryptedPayload } from './api.js';
-import { chatEncryptionKey, decryptMessage, encryptContent } from './e2ee.js';
+import { chatEncryptionKey, currentChatKey, decryptMessage, encryptContent } from './e2ee.js';
 
 const MAX_PLAINTEXT_BYTES = 25 * 1024 * 1024;
 const encoder = new TextEncoder();
@@ -41,7 +41,9 @@ export const encryptMediaMessage = async (
   source: string | Blob
 ): Promise<{ encrypted: OutboundEncryptedPayload; encryptedMediaId: string }> => {
   const { bytes, mimeType } = await sourceBytes(source);
-  const key = await chatEncryptionKey(chatId);
+  // The media is sealed with the chat key of ONE version; the message that carries its key must use the same version
+  // (encryptContent throws StaleChatKeyError if the chat moved to a new key version in between, so nothing mismatched is sent).
+  const { key, version } = await currentChatKey(chatId);
   const nonce = crypto.getRandomValues(new Uint8Array(12));
   const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: buffer(nonce), additionalData: mediaAad(chatId) }, key, bytes);
   const { id } = await api.uploadEncryptedMedia(chatId, new Blob([ciphertext], { type: 'application/octet-stream' }));
@@ -50,7 +52,7 @@ export const encryptMediaMessage = async (
   delete safePayload.mp4Url;
   delete safePayload.posterUrl;
   safePayload.encryptedMedia = { version: 1, id, nonce: bytesToB64(nonce), mimeType, size: bytes.byteLength };
-  const encrypted = await encryptContent(chatId, senderId, { kind, text: null, payload: safePayload });
+  const encrypted = await encryptContent(chatId, senderId, { kind, text: null, payload: safePayload }, version);
   return { encrypted, encryptedMediaId: id };
 };
 

@@ -25,7 +25,7 @@ export type ChatMessageSummary = {
 
 export type EncryptedPayload =
   | { version: 1; nonce: string; ciphertext: string }
-  | { version: 2; cipherId: string; nonce: string; ciphertext: string; /** Groups: which key version sealed it. */ keyVersion?: number };
+  | { version: 2; cipherId: string; nonce: string; ciphertext: string; /** Which chat/group key version sealed it (direct chats: absent = version 1, from before key versions). */ keyVersion?: number };
 
 export type OutboundEncryptedPayload = Extract<EncryptedPayload, { version: 2 }>;
 
@@ -124,11 +124,22 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
+    /** The JSON body of the error answer, when there was one (e.g. the current key version of a chat). */
+    public readonly data?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'ApiError';
   }
 }
+
+export type ChatCryptoState = {
+  members: Array<{ userId: string; publicKey: JsonWebKey | null; fingerprint: string | null }>;
+  /** Current key version (0 = none yet) and, after a member started fresh, the version that must be created next. */
+  keyVersion: number;
+  pendingKeyVersion: number | null;
+  /** Envelopes for the caller, newest version first; each carries the sender's public key as it was when wrapped. */
+  envelopes: Array<{ senderId: string; version: number; nonce: string; ciphertext: string; senderFingerprint: string | null; senderPublicKey: JsonWebKey | null }>;
+};
 
 let unauthorizedHandler: (() => void) | undefined;
 
@@ -170,8 +181,8 @@ const request = async <T>(path: string, init?: RequestInit, timeoutMs = JSON_TIM
 
     if (!response.ok) {
       if (response.status === 401 && !outer?.aborted) unauthorizedHandler?.();
-      const body = await response.json().catch(() => null) as { error?: string } | null;
-      throw new ApiError(body?.error ?? 'در ارتباط با سرور مشکلی پیش آمد.', response.status);
+      const body = await response.json().catch(() => null) as ({ error?: string } & Record<string, unknown>) | null;
+      throw new ApiError(body?.error ?? 'در ارتباط با سرور مشکلی پیش آمد.', response.status, body && typeof body === 'object' && !Array.isArray(body) ? body : undefined);
     }
 
     if (response.status === 204) return undefined as T;
@@ -219,8 +230,11 @@ export const api = {
   resetCryptoIdentity: (expectedRevision: number, actionToken: string) => request<void>('/api/crypto/identity/reset', { method: 'POST', body: JSON.stringify({ expectedRevision, actionToken }) }),
   checkPassword: (password: string) => request<void>('/api/crypto/password-check', { method: 'POST', body: JSON.stringify({ password }) }),
   channelKey: (channelId: string) => request<{ version: number; key: string }>(`/api/channels/${encodeURIComponent(channelId)}/key`),
-  chatCrypto: (chatId: string) => request<{ members: Array<{ userId: string; publicKey: JsonWebKey | null; fingerprint: string | null }>; envelope: { senderId: string; version: 1; nonce: string; ciphertext: string } | null }>(`/api/chats/${encodeURIComponent(chatId)}/crypto`),
-  createCryptoEnvelopes: (chatId: string, envelopes: Array<{ recipientId: string; version: 1; nonce: string; ciphertext: string }>) => request<void>(`/api/chats/${encodeURIComponent(chatId)}/crypto/envelopes`, { method: 'POST', body: JSON.stringify({ envelopes }) }),
+  chatCrypto: (chatId: string) => request<ChatCryptoState>(`/api/chats/${encodeURIComponent(chatId)}/crypto`),
+  createCryptoEnvelopes: (chatId: string, body: { version: number; senderFingerprint: string; envelopes: Array<{ recipientId: string; recipientFingerprint: string; nonce: string; ciphertext: string }> }) =>
+    request<{ keyVersion: number }>(`/api/chats/${encodeURIComponent(chatId)}/crypto/envelopes`, { method: 'POST', body: JSON.stringify(body) }),
+  /** How many chats (direct + Saved Messages) a "start fresh" touches. */
+  cryptoResetImpact: () => request<{ chats: number }>('/api/crypto/identity/reset-impact'),
   sync: (since?: number) => request<SyncResponse>(`/api/sync${since === undefined ? '' : `?since=${since}`}`),
   messages: (chatId: string, before?: string, limit = 50) => {
     const query = new URLSearchParams({ limit: String(limit) });

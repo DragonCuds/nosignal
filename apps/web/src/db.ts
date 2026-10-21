@@ -18,6 +18,8 @@ export type OutboxRow = {
   attempts: number;
   nextAttemptAt: number;
   error?: string;
+  /** How many times this row was re-encrypted because the chat key version moved on (NS-07). */
+  rekeys?: number;
 };
 export type ChatRow = { id: string; data: unknown; updatedAt: number };
 export type MessageRow = { chatId: string; id: string; n: number; data: unknown };

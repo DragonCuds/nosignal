@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError, notifyUnauthorized, onUnauthorized, type Chat, type RealtimeEvent, type User } from './api.js';
-import { onOutboxSent, startOutbox } from './outbox.js';
+import { onOutboxSent, setStaleKeyRecovery, startOutbox } from './outbox.js';
 import { clearMediaCache } from './mediaCache.js';
-import { baselineSeq, cacheChats, cacheEventMessage, catchUp, clearCache, type CatchUp as CatchUpResult, noteLiveSeq, prepareCache, readCachedChats, type SyncSignal } from './sync.js';
+import { baselineSeq, cacheChats, cacheEventMessage, catchUp, clearCache, type CatchUp as CatchUpResult, noteLiveSeq, plainOf, prepareCache, readCachedChats, type SyncSignal } from './sync.js';
 import { ChatIcon } from './icons.js';
 import { Conversation } from './Conversation.js';
 import { NewChatDialog, SettingsDialog } from './Dialogs.js';
 import { LoadingScreen, LoginPage } from './Login.js';
 import { Sidebar } from './Sidebar.js';
 import { useRealtime } from './realtime.js';
-import { decryptMessage, registerChannelChats, registerGroupChats, getBackup, hasLocalIdentity, importIdentity, initializeEncryption, resetIdentity } from './e2ee.js';
+import { decryptMessage, KeyChangedError, reencryptForStaleKey, registerChannelChats, registerGroupChats, getBackup, hasLocalIdentity, importIdentity, initializeEncryption, resetIdentity } from './e2ee.js';
 import { JoinPage, inviteTokenFromPath } from './join/JoinPage.js';
 import { RecoveryScreen } from './backup/RecoveryScreen.js';
 import { clearBackupAccount, fetchServerBackup, setBackupAccount, uploadBackup } from './backup/serverBackup.js';
@@ -117,6 +117,16 @@ function Messenger({ initialChatId, user, theme, onToggleTheme, onLogout }: Mess
   useEffect(() => {
     let live = true;
     let stopOutbox: (() => void) | undefined;
+    // A queued text whose chat key version went stale (a contact started fresh): seal it again with the new version while the
+    // plaintext is still in memory. After a reload the plaintext is gone, so it fails with a clear message instead.
+    const stopRecovery = setStaleKeyRecovery(async (row) => {
+      const plain = plainOf(row.clientMsgId);
+      if (!plain || typeof plain.text !== 'string') throw new Error('کلید گفت‌وگو عوض شده و متن این پیام دیگر در حافظه نیست؛ دوباره بفرستید.');
+      try { return await reencryptForStaleKey(row.chatId, user.id, { kind: 'text', text: plain.text, payload: null }); } catch (caught) {
+        if (caught instanceof KeyChangedError) throw new Error('کلید رمزنگاری مخاطب عوض شده است. پس از تأیید آن، پیام را دوباره بفرستید.');
+        throw new Error('پیام با کلید جدید رمزگذاری نشد؛ دوباره بفرستید.');
+      }
+    });
     void (async () => {
       await prepareCache(user.id);
       if (!live) return;
@@ -134,7 +144,7 @@ function Messenger({ initialChatId, user, theme, onToggleTheme, onLogout }: Mess
       }
       await startEncryption(hasKey);
     })();
-    return () => { live = false; stopOutbox?.(); };
+    return () => { live = false; stopOutbox?.(); stopRecovery(); };
   }, [user.id]);
 
   /** Chat-list part of a message/chat event (shared by live events and events replayed by polling). */

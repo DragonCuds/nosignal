@@ -235,6 +235,25 @@ test('identity reset needs the right password, clears identity + envelopes + sto
   const chat = (await db.query('INSERT INTO chats DEFAULT VALUES RETURNING id')).rows[0].id;
   await db.query('INSERT INTO chat_members (chat_id, user_id) VALUES ($1, $2), ($1, $3)', [chat, me, other]);
   for (const [r, s] of [[me, me], [other, me]]) await db.query("INSERT INTO chat_key_envelopes (chat_id, recipient_id, sender_id, version, nonce, ciphertext) VALUES ($1, $2, $3, 1, $4, $5)", [chat, r, s, b64(16), b64(60)]);
+  await db.query('INSERT INTO direct_chat_keys (chat_id, key_version) VALUES ($1, 1)', [chat]);
+  // NS-07: a second chat whose version row is missing (reset must still keep the contact's envelope and ask for a new version).
+  const rowless = (await db.query('INSERT INTO chats DEFAULT VALUES RETURNING id')).rows[0].id;
+  await db.query('INSERT INTO chat_members (chat_id, user_id) VALUES ($1, $2), ($1, $3)', [rowless, me, other]);
+  for (const [r, s] of [[me, other], [other, other]]) await db.query("INSERT INTO chat_key_envelopes (chat_id, recipient_id, sender_id, version, nonce, ciphertext) VALUES ($1, $2, $3, 1, $4, $5)", [rowless, r, s, b64(16), b64(60)]);
+  // Saved Messages: a single member, one envelope to itself.
+  const saved = (await db.query('INSERT INTO chats DEFAULT VALUES RETURNING id')).rows[0].id;
+  await db.query('INSERT INTO chat_members (chat_id, user_id) VALUES ($1, $2)', [saved, me]);
+  await db.query('INSERT INTO saved_chats (user_id, chat_id) VALUES ($1, $2)', [me, saved]);
+  await db.query("INSERT INTO chat_key_envelopes (chat_id, recipient_id, sender_id, version, nonce, ciphertext) VALUES ($1, $2, $2, 1, $3, $4)", [saved, me, b64(16), b64(60)]);
+  await db.query('INSERT INTO direct_chat_keys (chat_id, key_version) VALUES ($1, 1)', [saved]);
+  // A chat the user is not in must not be touched.
+  const unrelated = (await db.query('INSERT INTO chats DEFAULT VALUES RETURNING id')).rows[0].id;
+  await db.query('INSERT INTO chat_members (chat_id, user_id) VALUES ($1, $2)', [unrelated, other]);
+  await db.query("INSERT INTO chat_key_envelopes (chat_id, recipient_id, sender_id, version, nonce, ciphertext) VALUES ($1, $2, $2, 1, $3, $4)", [unrelated, other, b64(16), b64(60)]);
+  await db.query('INSERT INTO direct_chat_keys (chat_id, key_version) VALUES ($1, 1)', [unrelated]);
+  const impact = await call(cookie, 'GET', '/api/crypto/identity/reset-impact');
+  assert.equal(impact.statusCode, 200);
+  assert.deepEqual(impact.json(), { chats: 2 }, 'direct chat + Saved Messages (the version-less chat is counted only after reconciliation)');
 
   const gchat = (await db.query('INSERT INTO chats DEFAULT VALUES RETURNING id')).rows[0].id;
   await db.query('INSERT INTO chat_members (chat_id, user_id) VALUES ($1, $2), ($1, $3)', [gchat, me, other]);
@@ -248,7 +267,16 @@ test('identity reset needs the right password, clears identity + envelopes + sto
   assert.equal((await call(cookie, 'POST', '/api/crypto/identity/reset', { password: 'right-password' })).statusCode, 204);
   assert.equal((await db.query('SELECT 1 FROM user_crypto_identities WHERE user_id = $1', [me])).rowCount, 0);
   assert.equal((await db.query('SELECT 1 FROM user_crypto_identities WHERE user_id = $1', [other])).rowCount, 1, 'peer identity untouched');
-  assert.equal((await db.query('SELECT 1 FROM chat_key_envelopes WHERE chat_id = $1', [chat])).rowCount, 0);
+  const holders = async (c) => (await db.query('SELECT recipient_id, version FROM chat_key_envelopes WHERE chat_id = $1 ORDER BY recipient_id', [c])).rows.map((r) => `${r.recipient_id}:${r.version}`);
+  assert.deepEqual(await holders(chat), [`${other}:1`], 'only the resetting user\'s envelope is removed; the contact keeps theirs');
+  assert.deepEqual(await holders(rowless), [`${other}:1`]);
+  assert.deepEqual(await holders(saved), [], 'Saved Messages: the only envelope was the user\'s own');
+  assert.deepEqual(await holders(unrelated), [`${other}:1`], 'chats without this user are untouched');
+  const versions = async (c) => (await db.query('SELECT key_version, pending_version FROM direct_chat_keys WHERE chat_id = $1', [c])).rows[0];
+  assert.deepEqual(await versions(chat), { key_version: 1, pending_version: 2 });
+  assert.deepEqual(await versions(rowless), { key_version: 1, pending_version: 2 }, 'a missing version row is reconstructed');
+  assert.deepEqual(await versions(saved), { key_version: 1, pending_version: 2 });
+  assert.deepEqual(await versions(unrelated), { key_version: 1, pending_version: null });
   assert.equal((await db.query('SELECT pending_version FROM groups WHERE id = $1', [group])).rows[0].pending_version, 3, 'group needs a key rotation after the member reset');
   assert.equal((await db.query('SELECT pending_version FROM groups WHERE id = $1', [otherGroup])).rows[0].pending_version, null, 'unrelated group untouched');
   const got = (await call(cookie, 'GET', '/api/crypto/backup')).json();

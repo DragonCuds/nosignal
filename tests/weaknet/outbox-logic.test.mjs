@@ -138,3 +138,62 @@ test('startOutbox: persisted rows load, sending is reset to pending, then they s
   assert.equal(m.listOutbox('B')[0].state, 'failed');
   stop();
 });
+
+// NS-07: a queued message refused because its chat key version is stale.
+const stale = (status = 409) => {
+  const error = new m.ApiError('stale', status);
+  error.data = status === 409 ? { error: 'pending', keyVersion: 1, pendingKeyVersion: 2 } : { error: 'stale', keyVersion: 2, pendingKeyVersion: null };
+  return error;
+};
+
+test('stale key: a queued text is sealed again with the new key and goes out; the attempt counter is not burnt', async () => {
+  reset();
+  const sealed = [];
+  const stop = m.setStaleKeyRecovery(async (row) => { sealed.push(row.clientMsgId); return { version: 2, cipherId: 'c2', nonce: 'n2', ciphertext: 't2', keyVersion: 2 }; });
+  m.script.push(async () => { throw stale(409); });
+  m.enqueue(base('a-1', 'A', 1));
+  await until(() => m.calls.length === 2 && m.listOutbox('A').length === 0);
+  assert.deepEqual(sealed, ['a-1']);
+  assert.equal(m.calls[0].args[1].version, 2, 'first send used the old envelope');
+  assert.equal(m.calls[1].args[1].keyVersion, 2, 'second send carries the new key version');
+  assert.equal(m.calls[1].args.at(-1), 'a-1', 'same clientMsgId, so the server dedupes');
+  stop();
+});
+
+test('stale key: recovery that cannot run fails the row with a clear message; media rows never pretend; the cap stops a loop', async () => {
+  reset();
+  let stop = m.setStaleKeyRecovery(async () => { throw new Error('کلید رمزنگاری مخاطب عوض شده است. پس از تأیید آن، پیام را دوباره بفرستید.'); });
+  m.script.push(async () => { throw stale(400); });
+  m.enqueue(base('a-1', 'A', 1));
+  await until(() => m.listOutbox('A')[0]?.state === 'failed');
+  assert.match(m.listOutbox('A')[0].error, /کلید رمزنگاری مخاطب عوض شده/);
+  assert.equal(m.calls.length, 1, 'nothing was sent behind the user\'s back');
+  stop();
+
+  reset();
+  stop = m.setStaleKeyRecovery(async () => { throw new Error('must not be called for media'); });
+  m.script.push(async () => { throw stale(409); });
+  m.enqueue(base('s-1', 'A', 1, { kind: 'sticker', encryptedMediaId: 'em1', payload: { stickerId: 'x' } }));
+  await until(() => m.listOutbox('A')[0]?.state === 'failed');
+  assert.match(m.listOutbox('A')[0].error, /دوباره بفرستید/);
+  stop();
+
+  reset();
+  stop = m.setStaleKeyRecovery(async () => ({ version: 2, cipherId: 'c', nonce: 'n', ciphertext: 't', keyVersion: 2 }));
+  for (let i = 0; i < 4; i += 1) m.script.push(async () => { throw stale(409); });
+  m.enqueue(base('a-1', 'A', 1));
+  await until(() => m.listOutbox('A')[0]?.state === 'failed');
+  assert.equal(m.calls.length, 3, 'original send + two re-encryptions, then it stops and tells the user');
+  m.retryNow('a-1'); // a manual retry gets a fresh allowance
+  await until(() => m.calls.length >= 4);
+  stop();
+});
+
+test('stale key: without a recovery handler (page reloaded, plaintext gone) the row fails clearly', async () => {
+  reset();
+  m.setStaleKeyRecovery(undefined);
+  m.script.push(async () => { throw stale(409); });
+  m.enqueue(base('a-1', 'A', 1));
+  await until(() => m.listOutbox('A')[0]?.state === 'failed');
+  assert.match(m.listOutbox('A')[0].error, /کلید گفت‌وگو عوض شده/);
+});

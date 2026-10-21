@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { encryptContent } from '../e2ee.js';
+import { encryptContent, withFreshChatKey } from '../e2ee.js';
 import type { UiMessage } from '../chat/helpers.js';
 import { reportTransfer } from '../datasaver.js';
 import { CHUNK_SIZE, chunkCount, cipherSize, encryptChunk, encryptChunks, importAttachmentKey, newAttachmentSecrets, unb64u } from './crypto.js';
@@ -57,8 +57,11 @@ export const sendAttachment = async (deps: SenderDeps, input: AttachmentInput): 
       await api.uploadAttachment(chatId, id, new Blob(parts as BlobPart[], { type: 'application/octet-stream' }), (done) => setProgress(id, done));
     }
 
-    const encrypted = await encryptContent(chatId, userId, { kind: input.kind, text: caption ?? null, payload });
-    const saved = await api.sendAttachment(chatId, input.kind, id, encrypted, replyToId);
+    // The file is sealed with its own key, which travels inside this message, so a stale chat key version only costs one re-encryption.
+    const saved = await withFreshChatKey(chatId, async () => {
+      const encrypted = await encryptContent(chatId, userId, { kind: input.kind, text: caption ?? null, payload });
+      return api.sendAttachment(chatId, input.kind, id, encrypted, replyToId);
+    });
     deps.settle(temporary, { ...saved, text: caption ?? null, payload });
   } catch (error) {
     if (temporary) deps.discard(temporary);

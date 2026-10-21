@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api, type Chat, type Gif, type GifMessagePayload, type Message, type OutboundEncryptedPayload, type RealtimeEvent, type Sticker, type StickerMessagePayload, type User } from './api.js';
 import { DownIcon } from './icons.js';
-import { acceptKeyChange, checkKeyChanges, decryptMessage as decryptPlain, encryptContent, KeyChangedError } from './e2ee.js';
+import { acceptKeyChange, checkKeyChanges, decryptMessage as decryptPlain, encryptContent, KeyChangedError, onKeyChangeSuspected, StaleChatKeyError, withFreshChatKey } from './e2ee.js';
 import { discard as discardOutbox, enqueue, listOutbox, newClientMsgId, onOutboxChange, onOutboxSent, retryNow, type OutboxRow } from './outbox.js';
 import { cacheEventMessage, cacheMessages, forgetPlain, plainOf, readCachedMessages, rememberPlain, type SyncSignal } from './sync.js';
 import { decryptMessageMedia as decryptMessage, decryptMessagesMedia as decryptMessages, encryptMediaMessage } from './encrypted-media.js';
@@ -286,6 +286,8 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
     } catch { /* offline or not ready: try again later */ }
   });
   useEffect(() => { setKeyChanges([]); setKeyDismissed(false); void refreshKeyChanges(); }, [chat.id]);
+  // A queued message was refused because the contact started fresh: show the key-change notice instead of waiting for a reload.
+  useEffect(() => onKeyChangeSuspected((changedChat) => { if (changedChat === chat.id) { setKeyDismissed(false); void refreshKeyChanges(); } }), [chat.id]);
   useEffect(() => {
     if (!groupId) return;
     const tick = () => { void ensureGroupKeyed(chat.id, groupId).catch((error: unknown) => {
@@ -301,6 +303,7 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
     await acceptKeyChange(chat.id, change);
     setKeyChanges([]);
     setKeyDismissed(false);
+    for (const row of listOutbox(chat.id)) if (row.state === 'failed') retryNow(row.clientMsgId); // messages that waited for this decision go out now
     await load();
     void refreshKeyChanges();
   };
@@ -510,8 +513,9 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
       queue(clientMsgId, kind, secured.encrypted, { text: null, payload }, replyTo, secured.encryptedMediaId);
       setMessages((current) => current.filter((item) => item.id !== temporary.id));
       after?.();
-    } catch {
-      markFailed(temporary.id, kind === 'sticker' ? 'استیکر رمزگذاری یا ارسال نشد.' : 'گیف رمزگذاری یا ارسال نشد.', () => { dropDraft(temporary.id); void sendMedia(kind, payload, source, replyTo, after); });
+    } catch (caught) {
+      const changed = caught instanceof StaleChatKeyError ? ' کلید گفت‌وگو همین الان عوض شد؛ دوباره بفرستید.' : '';
+      markFailed(temporary.id, (kind === 'sticker' ? 'استیکر رمزگذاری یا ارسال نشد.' : 'گیف رمزگذاری یا ارسال نشد.') + changed, () => { dropDraft(temporary.id); void sendMedia(kind, payload, source, replyTo, after); });
     }
   };
 
@@ -537,8 +541,10 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
   const submit = async (text: string) => {
     if (mode?.kind !== 'edit') return sendText(text, replyId);
     try {
-      const encrypted = await encryptContent(chat.id, currentUser.id, { kind: 'text', text, payload: null });
-      const saved = { ...await api.editMessage(chat.id, mode.message.id, encrypted), text };
+      const saved = await withFreshChatKey(chat.id, async () => {
+        const encrypted = await encryptContent(chat.id, currentUser.id, { kind: 'text', text, payload: null });
+        return { ...await api.editMessage(chat.id, mode.message.id, encrypted), text };
+      });
       setMessages((current) => current.map((item) => item.id === saved.id ? saved : item));
       setMode(null);
       onChatChanged(chat.id);

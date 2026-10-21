@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { ApiError } from '../api.js';
+import { api, ApiError } from '../api.js';
 import { decryptBackup, fromRecoveryKey, unwrapFromServer, type BackupPayload } from './crypto.js';
 import { fetchServerBackup } from './serverBackup.js';
 import './backup.css';
@@ -37,6 +37,14 @@ export function RecoveryScreen({ userId, onRestored, onFresh, onLogout }: Props)
   const [confirmFresh, setConfirmFresh] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
+  // How many chats "start fresh" touches; null while unknown (the line is then shown without a number).
+  const [affectedChats, setAffectedChats] = useState<number | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    void api.cryptoResetImpact().then((impact) => { if (live) setAffectedChats(impact.chats); }).catch(() => undefined);
+    return () => { live = false; };
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -111,14 +119,18 @@ export function RecoveryScreen({ userId, onRestored, onFresh, onLogout }: Props)
 
       <form className="group" onSubmit={startFresh}>
         <h3>{serverCopy === 'yes' ? '۳' : '۲'}. شروع تازه</h3>
-        <p className="group__lead">یک کلید جدید ساخته می‌شود؛ پیام‌های رمزنگاری‌شدهٔ قبلی برای همیشه ناخواناست. پاک شدن کلید گفتگوهای مستقیم ممکن است بازیابی پیام‌های طرف مقابل را هم مختل کند.</p>
+        <p className="group__lead">یک کلید جدید ساخته می‌شود؛ پیام‌های رمزنگاری‌شدهٔ قبلی شما و پیام‌های ذخیره‌شدهٔ خودتان برای همیشه برای شما ناخواناست.</p>
+        <p className="group__lead" role="note">
+          {affectedChats === null ? '' : affectedChats > 0 ? `${affectedChats.toLocaleString('fa-IR')} گفتگوی شما تحت‌تأثیر قرار می‌گیرد. ` : 'گفتگویی که تحت‌تأثیر قرار بگیرد ندارید. '}
+          مخاطب‌های شما تاریخچهٔ گفتگو را نگه می‌دارند و شما از نو شروع می‌کنید.
+        </p>
         <label className="field"><span>رمز عبور حساب (برای تأیید)</span>
           <input type="password" autoComplete="current-password" dir="ltr" value={freshPassword} onChange={(e) => setFreshPassword(e.target.value)} />
         </label>
         <label className="field"><span>کد دومرحله‌ای یا بازیابی (اگر فعال است)</span><input autoComplete="one-time-code" dir="ltr" value={freshSecondFactor} onChange={(e) => setFreshSecondFactor(e.target.value)} /></label>
         <label className="backup-check">
           <input type="checkbox" checked={confirmFresh} onChange={(e) => setConfirmFresh(e.target.checked)} />
-          <span>می‌دانم که پیام‌های قبلی برای من خوانده نمی‌شوند و ممکن است بازیابی طرف مقابل نیز مختل شود.</span>
+          <span>می‌دانم که پیام‌های قبلی برای من خوانده نمی‌شوند و گفتگوها را از نو شروع می‌کنم.</span>
         </label>
         <button className="button button--soft" type="submit" disabled={busy || !freshPassword}>شروع تازه</button>
       </form>

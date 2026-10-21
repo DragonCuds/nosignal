@@ -175,8 +175,15 @@ export const registerCryptoBackupRoutes = async (app: FastifyInstance): Promise<
     return reply.code(204).send();
   });
 
+  // How many chats a "start fresh" touches (shown before the user confirms). Counts only; nothing else is revealed.
+  app.get('/api/crypto/identity/reset-impact', { preHandler: app.requireUser, config: { rateLimit: READ_LIMIT } }, async (request) => {
+    const row = (await db.query<{ n: number }>(
+      `SELECT count(*) AS n FROM direct_chat_keys k WHERE k.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id = $1)`, [request.user!.id])).rows[0];
+    return { chats: Number(row?.n ?? 0) };
+  });
+
   // "Start fresh": the account may take a NEW encryption identity. Needs the login password (a stolen
-  // session alone must not be able to swap the identity). Old encrypted chats lose their key envelopes.
+  // session alone must not be able to swap the identity). The user's own chat key envelopes are removed; contacts keep theirs.
   app.post<{ Body: { actionToken?: unknown; expectedRevision?: unknown } }>('/api/crypto/identity/reset', {
     preHandler: app.requireUser, config: { rateLimit: RESET_LIMIT }
   }, async (request, reply) => {
@@ -193,8 +200,16 @@ export const registerCryptoBackupRoutes = async (app: FastifyInstance): Promise<
       if (!(await consumeAction(client, request.body?.actionToken, userId, sessionId, 'identity.reset', expected as number))) {
         await client.query('ROLLBACK'); return reply.code(403).send({ error: 'Action authorization required' });
       }
-      // Every chat key envelope of every chat this user is in (both sides: the old key is unusable for the new identity).
-      await client.query('DELETE FROM chat_key_envelopes WHERE chat_id IN (SELECT chat_id FROM chat_members WHERE user_id = $1)', [userId]);
+      // Direct and Saved chats (NS-07): only THIS user's envelopes go (they were wrapped for the old identity and are useless
+      // to the new one). The contact's envelopes stay, together with the sender key stored in each one, so the contact
+      // keeps the whole history. Every such chat needs a new key version, which the next member to open it creates.
+      await client.query(
+        `INSERT INTO direct_chat_keys (chat_id, key_version, pending_version)
+         SELECT chat_id, max(version), NULL FROM chat_key_envelopes WHERE chat_id IN (SELECT chat_id FROM chat_members WHERE user_id = $1) GROUP BY chat_id
+         ON CONFLICT (chat_id) DO NOTHING`, [userId]);
+      await client.query(
+        'UPDATE direct_chat_keys SET pending_version = COALESCE(pending_version, key_version + 1) WHERE chat_id IN (SELECT chat_id FROM chat_members WHERE user_id = $1)', [userId]);
+      await client.query('DELETE FROM chat_key_envelopes WHERE recipient_id = $1', [userId]);
       await client.query('DELETE FROM user_crypto_identities WHERE user_id = $1', [userId]);
       // Groups: this member's envelopes are for the old identity. Ask an admin to rotate the key (new envelope for the new identity).
       await client.query('UPDATE groups SET pending_version = COALESCE(pending_version, key_version + 1) WHERE key_version > 0 AND chat_id IN (SELECT chat_id FROM chat_members WHERE user_id = $1)', [userId]);
