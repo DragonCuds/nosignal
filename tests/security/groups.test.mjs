@@ -64,7 +64,7 @@ before(async () => {
   for (const name of Object.keys(ids)) cookies[name] = cookieOf(await app.inject({ method: 'GET', url: `/test/login/${ids[name]}`, headers: { origin } }));
   for (const name of Object.keys(ids)) {
     if (name === 'noid') continue;
-    assert.equal((await send(name, 'PUT', '/api/crypto/identity', { publicKey: { kty: 'EC', crv: 'P-256', x: b64(32), y: b64(32) } })).statusCode, 200);
+    assert.equal((await send(name, 'PUT', '/api/crypto/identity', { expectedUserId: ids[name], publicKey: { kty: 'EC', crv: 'P-256', x: b64(32), y: b64(32) } })).statusCode, 200);
   }
 });
 

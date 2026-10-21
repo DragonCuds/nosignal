@@ -338,9 +338,10 @@ export const registerSecurityRoutes = async (app: FastifyInstance): Promise<void
     return deleted.rowCount ? reply.code(204).send() : reply.code(404).send({ error: 'Passkey not found' });
   });
 
-  app.post<{ Body: { currentPassword?: string; newPassword?: string; secondFactor?: string; backup?: unknown; expectedBackupRevision?: unknown } }>('/api/security/password', {
+  app.post<{ Body: { expectedUserId?: unknown; currentPassword?: string; newPassword?: string; secondFactor?: string; backup?: unknown; expectedBackupRevision?: unknown } }>('/api/security/password', {
     preHandler: app.requireUser, bodyLimit: 16 * 1024, config: { rateLimit: { max: 5, timeWindow: '1 hour' } }
   }, async (request, reply) => {
+    if (request.body?.expectedUserId !== request.user!.id) return reply.code(403).send({ error: 'Backup account does not match session' });
     const { currentPassword, newPassword, secondFactor, expectedBackupRevision } = request.body ?? {};
     if (typeof currentPassword !== 'string' || currentPassword.length > 1_024) return reply.code(403).send({ error: 'Reauthentication failed' });
     if (typeof newPassword !== 'string' || newPassword.length < 12 || newPassword.length > 1_024) {

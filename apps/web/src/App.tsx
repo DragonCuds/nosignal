@@ -12,7 +12,7 @@ import { useRealtime } from './realtime.js';
 import { decryptMessage, registerChannelChats, registerGroupChats, getBackup, hasLocalIdentity, importIdentity, initializeEncryption, resetIdentity } from './e2ee.js';
 import { JoinPage, inviteTokenFromPath } from './join/JoinPage.js';
 import { RecoveryScreen } from './backup/RecoveryScreen.js';
-import { fetchServerBackup, uploadBackup } from './backup/serverBackup.js';
+import { clearBackupAccount, fetchServerBackup, setBackupAccount, uploadBackup } from './backup/serverBackup.js';
 import { BackupWarning } from './backup/BackupWarning.js';
 import { BackupSaveNotice } from './backup/BackupSaveNotice.js';
 import { CreateGroupDialog } from './groups/CreateGroupDialog.js';
@@ -270,13 +270,13 @@ export default function App() {
     try { localStorage.setItem('tel-theme', theme); } catch { /* ignore */ }
   }, [theme]);
 
-  useEffect(() => onUnauthorized(() => { void clearMediaCache(); setAuth({ status: 'guest' }); }), []);
-  useEffect(() => { void api.me().then((user) => setAuth({ status: 'ready', user })).catch(() => setAuth({ status: 'guest' })); }, []);
+  useEffect(() => onUnauthorized(() => { clearBackupAccount(); void clearMediaCache(); setAuth({ status: 'guest' }); }), []);
+  useEffect(() => { void api.me().then((user) => { setBackupAccount(user.id); setAuth({ status: 'ready', user }); }).catch(() => setAuth({ status: 'guest' })); }, []);
 
   const joinToken = inviteTokenFromPath(window.location.pathname);
 
   const toggleTheme = () => setTheme((value) => value === 'dark' ? 'light' : 'dark');
-  const logout = async () => { try { await api.logout(); } finally { void clearCache(); setAuth({ status: 'guest' }); } };
+  const logout = async () => { clearBackupAccount(); try { await api.logout(); } finally { void clearCache(); setAuth({ status: 'guest' }); } };
 
   if (auth.status !== 'ready' && joinToken) return <JoinPage token={joinToken} theme={theme} onToggleTheme={toggleTheme} onJoined={(user) => { window.history.replaceState(null, '', '/'); setAuth({ status: 'ready', user }); }} />;
   if (auth.status === 'checking') return <LoadingScreen />;

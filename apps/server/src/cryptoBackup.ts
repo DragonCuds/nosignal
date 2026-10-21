@@ -96,9 +96,10 @@ export const registerCryptoBackupRoutes = async (app: FastifyInstance): Promise<
   });
 
   // Stores/replaces the one copy of the caller and switches the account to mode "auto".
-  app.put<{ Body: { salt?: unknown; iterations?: unknown; wrapped?: unknown; version?: unknown; expectedRevision?: unknown; password?: unknown; actionToken?: unknown } }>('/api/crypto/backup', {
+  app.put<{ Body: { salt?: unknown; iterations?: unknown; wrapped?: unknown; version?: unknown; expectedUserId?: unknown; expectedRevision?: unknown; password?: unknown; actionToken?: unknown } }>('/api/crypto/backup', {
     config: { rateLimit: WRITE_LIMIT }, preHandler: app.requireUser, bodyLimit: 16 * 1024
   }, async (request, reply) => {
+    if (request.body?.expectedUserId !== request.user!.id) return reply.code(403).send({ error: 'Backup account does not match session' });
     const blob = parseBackupBlob(request.body);
     if (!blob) return reply.code(400).send({ error: 'Invalid key backup' });
     const expected = request.body?.expectedRevision;

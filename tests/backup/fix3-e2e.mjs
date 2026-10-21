@@ -109,8 +109,9 @@ try {
   NAME.E = `fe${tag}`;
   const e = await fetch(`${BASE}/api/register`, { method: 'POST', headers: { 'content-type': 'application/json', origin: BASE }, body: JSON.stringify({ username: NAME.E, password: PASS, displayName: NAME.E }) });
   const cookie = e.headers.get('set-cookie')?.split(';')[0];
+  const userId = (await (await fetch(`${BASE}/api/me`, { headers: { origin: BASE, cookie } })).json()).id;
   const { publicKey } = await (async () => { const kp = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']); const j = await crypto.subtle.exportKey('jwk', kp.publicKey); return { publicKey: { kty: j.kty, crv: j.crv, x: j.x, y: j.y } }; })();
-  const put = await fetch(`${BASE}/api/crypto/identity`, { method: 'PUT', headers: { 'content-type': 'application/json', origin: BASE, cookie }, body: JSON.stringify({ publicKey }) });
+  const put = await fetch(`${BASE}/api/crypto/identity`, { method: 'PUT', headers: { 'content-type': 'application/json', origin: BASE, cookie }, body: JSON.stringify({ expectedUserId: userId, publicKey }) });
   check('S3 setup: identity registered without backup', put.status === 200);
   const e1 = await newCtx('E1'); await login(e1.page, 'E');
   check('S3 recovery screen explains there is no server copy and offers a fresh start', await waitFor(e1.page, 'هیچ نسخهٔ پشتیبانی از کلید این حساب روی سرور نیست.') && (await text(e1.page)).includes('شروع تازه'));

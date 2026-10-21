@@ -34,14 +34,19 @@ let app;
 let nextIp = 1;
 const ip = () => `10.8.${nextIp >> 8}.${nextIp++ & 255}`;
 const passwords = new Map();
+const userIds = new Map();
 const signup = async (username, password = 'correct-horse') => {
   const response = await app.inject({ method: 'POST', url: '/api/register', payload: { username, password }, remoteAddress: ip(), headers: { origin } });
   assert.equal(response.statusCode, 204, response.body);
   const cookie = response.headers['set-cookie'].split(';')[0];
   passwords.set(cookie, password);
+  userIds.set(cookie, (await db.query('SELECT id FROM users WHERE username = $1', [username])).rows[0].id);
   return cookie;
 };
 const call = async (cookie, method, url, payload, ipOverride) => {
+  if (method === 'PUT' && (url === '/api/crypto/backup' || url === '/api/crypto/identity') || method === 'POST' && url === '/api/security/password') {
+    payload = { expectedUserId: userIds.get(cookie), ...payload };
+  }
   if (passwords.has(cookie) && ((method === 'PUT' || method === 'DELETE') && url === '/api/crypto/backup' || method === 'POST' && url === '/api/crypto/identity/reset' && payload?.password)) {
     const state = await app.inject({ method: 'GET', url: '/api/crypto/backup', headers: { origin, cookie }, remoteAddress: ip() });
     const revision = state.statusCode === 404 ? 0 : state.json().revision;
@@ -98,6 +103,27 @@ test('GET is 404 until something is stored; PUT stores one row per user; PUT rep
   assert.equal((await call(cookie, 'GET', '/api/crypto/backup')).json().backup.iterations, 700_000);
   const user = (await db.query('SELECT id FROM users WHERE username = $1', ['bk_one'])).rows[0];
   assert.equal((await db.query('SELECT 1 FROM user_crypto_backups WHERE user_id = $1', [user.id])).rowCount, 1);
+});
+
+test('a delayed backup or initial identity from A cannot be written under B even when passwords match', async () => {
+  const a = await signup('bk_switch_a', 'same long password');
+  const b = await signup('bk_switch_b', 'same long password');
+  const aId = userIds.get(a);
+  const bId = userIds.get(b);
+  assert.notEqual(aId, bId);
+  const foreign = await call(b, 'PUT', '/api/crypto/backup', { ...goodBlob(), expectedUserId: aId });
+  assert.equal(foreign.statusCode, 403);
+  assert.equal((await call(b, 'GET', '/api/crypto/backup')).statusCode, 404);
+  const initial = await call(b, 'PUT', '/api/crypto/identity', { publicKey: pub('q'), backup: goodBlob(), expectedUserId: aId });
+  assert.equal(initial.statusCode, 403);
+  assert.equal((await call(b, 'PUT', '/api/crypto/identity', { publicKey: pub('q'), expectedUserId: aId })).statusCode, 403);
+  const wrongPasswordChange = await call(b, 'POST', '/api/security/password', {
+    expectedUserId: aId, currentPassword: 'same long password', newPassword: 'replacement long password', expectedBackupRevision: 0
+  });
+  assert.equal(wrongPasswordChange.statusCode, 403);
+  assert.equal((await db.query('SELECT 1 FROM user_crypto_identities WHERE user_id = $1', [bId])).rowCount, 0);
+  assert.equal((await call(b, 'GET', '/api/crypto/backup')).statusCode, 404);
+  assert.equal((await call(a, 'PUT', '/api/crypto/backup', goodBlob())).statusCode, 204);
 });
 
 test('validation: weak KDF cost, bad base64, oversize, wrong version and unknown shapes are rejected', async () => {
@@ -309,11 +335,11 @@ test('password change atomically rewraps the same identity and rejects stale bac
   assert.deepEqual(await unwrapFromServer(latest.backup, newPassword, userId), identity);
   await assert.rejects(unwrapFromServer(latest.backup, oldPassword, userId), /bad-passphrase/);
   const stale = await app.inject({ method: 'PUT', url: '/api/crypto/backup', payload: {
-    ...oldBlob, password: oldPassword, expectedRevision: before.revision
+    ...oldBlob, expectedUserId: userId, password: oldPassword, expectedRevision: before.revision
   }, headers: { origin, cookie }, remoteAddress: ip() });
   assert.equal(stale.statusCode, 403);
   const staleWithCurrentPassword = await app.inject({ method: 'PUT', url: '/api/crypto/backup', payload: {
-    ...oldBlob, password: newPassword, expectedRevision: before.revision
+    ...oldBlob, expectedUserId: userId, password: newPassword, expectedRevision: before.revision
   }, headers: { origin, cookie }, remoteAddress: ip() });
   assert.equal(staleWithCurrentPassword.statusCode, 409);
   assert.deepEqual((await call(cookie, 'GET', '/api/crypto/backup')).json().backup, newBlob);

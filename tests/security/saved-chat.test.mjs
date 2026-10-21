@@ -99,7 +99,7 @@ test('GET /api/chats lists it as type saved with no peer, direct chats keep thei
 });
 
 test('key envelope: a single envelope to itself for the saved chat', async () => {
-  assert.equal((await send('alice', 'PUT', '/api/crypto/identity', { publicKey: jwk() })).statusCode, 200);
+  assert.equal((await send('alice', 'PUT', '/api/crypto/identity', { expectedUserId: ids.alice, publicKey: jwk() })).statusCode, 200);
   const env = { recipientId: ids.alice, version: 1, nonce: b64(12), ciphertext: b64(48) };
   assert.equal((await send('alice', 'POST', `/api/chats/${savedId}/crypto/envelopes`, { envelopes: [env, env] })).statusCode, 400);
   assert.equal((await send('alice', 'POST', `/api/chats/${savedId}/crypto/envelopes`, { envelopes: [{ ...env, recipientId: ids.bob }] })).statusCode, 400);

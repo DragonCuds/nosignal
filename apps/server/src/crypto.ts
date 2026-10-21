@@ -24,7 +24,8 @@ export const registerCryptoRoutes = async (app: FastifyInstance): Promise<void> 
   // `backup` (optional) is the password-wrapped copy of the new private key. It is stored in the SAME transaction
   // as a brand-new identity, so the server never knows an identity whose key has no recoverable copy (unless the
   // account chose manual mode). Ignored when the identity already exists.
-  app.put<{ Body: { publicKey?: unknown; backup?: unknown } }>('/api/crypto/identity', { preHandler: app.requireUser, config: { rateLimit: WRITE_LIMIT }, bodyLimit: 16 * 1024 }, async (request, reply) => {
+  app.put<{ Body: { publicKey?: unknown; backup?: unknown; expectedUserId?: unknown } }>('/api/crypto/identity', { preHandler: app.requireUser, config: { rateLimit: WRITE_LIMIT }, bodyLimit: 16 * 1024 }, async (request, reply) => {
+    if (request.body?.expectedUserId !== request.user!.id) return reply.code(403).send({ error: 'Identity account does not match session' });
     if (!validPublicJwk(request.body?.publicKey)) return reply.code(400).send({ error: 'Invalid P-256 public key' });
     const key = { kty: 'EC', crv: 'P-256', x: request.body.publicKey.x, y: request.body.publicKey.y } satisfies JsonWebKey;
     const hash = fingerprint(key);

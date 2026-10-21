@@ -3,7 +3,7 @@ import { startAuthentication } from '@simplewebauthn/browser';
 import { api, ApiError, type User } from './api.js';
 import { ChatIcon, LockIcon, MoonIcon, SunIcon } from './icons.js';
 import { checkUsername, isSignupOpen, registerAccount, signupErrorText, USERNAME_RE, validateSignup, type SignupCheck } from './registerApi.js';
-import { setupBackupAfterSignup, syncBackupAfterLogin } from './backup/serverBackup.js';
+import { setBackupAccount, setupBackupAfterSignup, syncBackupAfterLogin } from './backup/serverBackup.js';
 import './styles/signup.css';
 
 type Theme = 'light' | 'dark';
@@ -65,6 +65,7 @@ function SignupForm({ onAuthenticated }: { onAuthenticated: (user: User) => void
       await registerAccount(username, password, displayName);
       // Same as the invite flow: the session cookie is set; E2EE identity creation and the backup reminder run when the messenger opens.
       const me = await api.me();
+      setBackupAccount(me.id);
       await setupBackupAfterSignup(me.id, password); // Auto mode: key made now, wrapped with the password, stored on the server
       onAuthenticated(me);
     } catch (caught) {
@@ -122,6 +123,7 @@ export function LoginPage({ theme, onToggleTheme, onAuthenticated }: Props) {
     try {
       await api.login(username.trim(), password, secondFactor || undefined);
       const me = await api.me();
+      setBackupAccount(me.id);
       await syncBackupAfterLogin(me.id, password); // restores the key on a new device / uploads the backup; never blocks login
       onAuthenticated(me);
     } catch (caught) {
@@ -141,7 +143,9 @@ export function LoginPage({ theme, onToggleTheme, onAuthenticated }: Props) {
       const optionsJSON = await api.passkeyLoginOptions();
       const response = await startAuthentication({ optionsJSON });
       await api.verifyPasskeyLogin(response);
-      onAuthenticated(await api.me());
+      const me = await api.me();
+      setBackupAccount(me.id);
+      onAuthenticated(me);
     } catch (caught) {
       setError(caught instanceof Error && caught.name !== 'NotAllowedError' ? caught.message : 'ورود با کلید عبور لغو شد یا موفق نبود.');
     } finally { setSubmitting(false); }

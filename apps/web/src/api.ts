@@ -166,7 +166,7 @@ const request = async <T>(path: string, init?: RequestInit, timeoutMs = JSON_TIM
     });
 
     if (!response.ok) {
-      if (response.status === 401) unauthorizedHandler?.();
+      if (response.status === 401 && !outer?.aborted) unauthorizedHandler?.();
       const body = await response.json().catch(() => null) as { error?: string } | null;
       throw new ApiError(body?.error ?? 'در ارتباط با سرور مشکلی پیش آمد.', response.status);
     }
@@ -206,12 +206,12 @@ export const api = {
   usernameAvailable: (u: string, signal?: AbortSignal) => request<{ available: boolean; valid: boolean }>(`/api/username-available?${new URLSearchParams({ u })}`, { signal }),
   register: (username: string, password: string, displayName?: string) =>
     request<void>('/api/register', { method: 'POST', body: JSON.stringify({ username, password, displayName }) }),
-  registerCryptoIdentity: (publicKey: JsonWebKey, backup?: { salt: string; iterations: number; wrapped: string; version: 1 }) => request<{ fingerprint: string; backupSaved?: boolean }>('/api/crypto/identity', { method: 'PUT', body: JSON.stringify(backup ? { publicKey, backup } : { publicKey }) }),
-  cryptoBackup: () => request<{ mode: 'auto' | 'manual'; backup: { salt: string; iterations: number; wrapped: string; version: 1 } | null; revision: number; updatedAt: string }>('/api/crypto/backup'),
+  registerCryptoIdentity: (userId: string, publicKey: JsonWebKey, backup?: { salt: string; iterations: number; wrapped: string; version: 1 }, signal?: AbortSignal) => request<{ fingerprint: string; backupSaved?: boolean }>('/api/crypto/identity', { method: 'PUT', body: JSON.stringify({ expectedUserId: userId, publicKey, backup }), signal }),
+  cryptoBackup: (signal?: AbortSignal) => request<{ mode: 'auto' | 'manual'; backup: { salt: string; iterations: number; wrapped: string; version: 1 } | null; revision: number; updatedAt: string }>('/api/crypto/backup', { signal }),
   cryptoActionGrant: (action: 'backup.replace' | 'backup.delete' | 'identity.reset', expectedRevision: number, password: string, secondFactor?: string) =>
     request<{ token: string }>('/api/crypto/action-grant', { method: 'POST', body: JSON.stringify({ action, expectedRevision, password, secondFactor }) }),
   cryptoSecurityEvents: () => request<Array<{ action: string; createdAt: string }>>('/api/crypto/security-events'),
-  putCryptoBackup: (blob: { salt: string; iterations: number; wrapped: string; version: 1 }, password: string, expectedRevision: number, actionToken?: string) => request<void>('/api/crypto/backup', { method: 'PUT', body: JSON.stringify({ ...blob, password, expectedRevision, actionToken }) }),
+  putCryptoBackup: (userId: string, blob: { salt: string; iterations: number; wrapped: string; version: 1 }, password: string, expectedRevision: number, actionToken?: string, signal?: AbortSignal) => request<void>('/api/crypto/backup', { method: 'PUT', body: JSON.stringify({ ...blob, expectedUserId: userId, password, expectedRevision, actionToken }), signal }),
   deleteCryptoBackup: (expectedRevision: number, actionToken: string) => request<void>('/api/crypto/backup', { method: 'DELETE', body: JSON.stringify({ expectedRevision, actionToken }) }),
   resetCryptoIdentity: (expectedRevision: number, actionToken: string) => request<void>('/api/crypto/identity/reset', { method: 'POST', body: JSON.stringify({ expectedRevision, actionToken }) }),
   checkPassword: (password: string) => request<void>('/api/crypto/password-check', { method: 'POST', body: JSON.stringify({ password }) }),
@@ -367,5 +367,5 @@ export const api = {
   passkeyRegistrationOptions: (password: string, secondFactor?: string) => request<PublicKeyCredentialCreationOptionsJSON>('/api/auth/passkeys/register/options', { method: 'POST', body: JSON.stringify({ password, secondFactor }) }),
   verifyPasskeyRegistration: (response: RegistrationResponseJSON, name?: string) => request<void>('/api/auth/passkeys/register/verify', { method: 'POST', body: JSON.stringify({ response, name }) }),
   deletePasskey: (id: string, password: string, secondFactor?: string) => request<void>(`/api/security/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ password, secondFactor }) }),
-  changePassword: (currentPassword: string, newPassword: string, expectedBackupRevision: number, backup?: { salt: string; iterations: number; wrapped: string; version: 1 }, secondFactor?: string) => request<void>('/api/security/password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword, expectedBackupRevision, backup, secondFactor }) }),
+  changePassword: (userId: string, currentPassword: string, newPassword: string, expectedBackupRevision: number, backup?: { salt: string; iterations: number; wrapped: string; version: 1 }, secondFactor?: string, signal?: AbortSignal) => request<void>('/api/security/password', { method: 'POST', body: JSON.stringify({ expectedUserId: userId, currentPassword, newPassword, expectedBackupRevision, backup, secondFactor }), signal }),
 };

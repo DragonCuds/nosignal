@@ -150,17 +150,22 @@ export type InitResult = { fingerprint: string; created: boolean; backupSaved: b
  * With `wrap`, a freshly created key is sent together with its password-wrapped backup so the server stores
  * both in one transaction (no window in which the server knows the identity but holds no recoverable copy).
  */
-export const initializeIdentity = async (userId: string, wrap?: (payload: BackupPayload) => Promise<ServerBackupBlob>): Promise<InitResult> => {
+export const initializeIdentity = async (userId: string, wrap?: (payload: BackupPayload) => Promise<ServerBackupBlob>, beforeWrite?: () => void, signal?: AbortSignal): Promise<InitResult> => {
   groupCtxs.clear();
   const stored = await dbGet(userId);
+  beforeWrite?.();
   let created = false;
   if (stored) identity = stored;
   else {
     const pair = await generateBackupablePair();
+    beforeWrite?.();
+    const next = { userId, privateKey: await toExtractable(pair.privateJwk), publicKey: pair.publicJwk, fingerprint: await fingerprint(pair.publicJwk) };
+    beforeWrite?.();
     sessionPrivateJwk = pair.privateJwk;
     // Stored extractable on purpose (backup needs to export it); see SECURITY.md "Key storage". Do not change without a new backup design.
-    identity = { userId, privateKey: await toExtractable(pair.privateJwk), publicKey: pair.publicJwk, fingerprint: await fingerprint(pair.publicJwk) };
-    await dbPut(identity);
+    identity = next;
+    await dbPut(next);
+    beforeWrite?.();
     created = true;
   }
   let blob: ServerBackupBlob | undefined;
@@ -171,7 +176,8 @@ export const initializeIdentity = async (userId: string, wrap?: (payload: Backup
     } catch { /* registered without a backup; the caller queues the upload */ }
   }
   try {
-    const result = await api.registerCryptoIdentity(identity.publicKey, blob);
+    beforeWrite?.();
+    const result = await api.registerCryptoIdentity(userId, identity.publicKey, blob, signal);
     return { fingerprint: identity.fingerprint, created, backupSaved: Boolean(result.backupSaved) };
   } catch (caught) {
     // The account is already bound to another identity (this browser lost its key): do not keep a useless new key here.
@@ -219,23 +225,25 @@ export const resetIdentity = async (userId: string, password: string, secondFact
   sessionPrivateJwk = pair.privateJwk;
   keyCache.clear();
   groupCtxs.clear();
-  await api.registerCryptoIdentity(next.publicKey);
+  await api.registerCryptoIdentity(userId, next.publicKey);
 };
 
 /** Restore an identity from a backup (new device): store it extractable (so it can be backed up again) and re-register. */
-export const importIdentity = async (payload: BackupPayload): Promise<void> => {
+export const importIdentity = async (payload: BackupPayload, beforeWrite?: () => void, signal?: AbortSignal): Promise<void> => {
   const next: StoredIdentity = {
     userId: payload.userId,
     privateKey: await toExtractable(payload.privateKey),
     publicKey: payload.publicKey,
     fingerprint: await fingerprint(payload.publicKey),
   };
+  beforeWrite?.();
   await dbPut(next);
+  beforeWrite?.();
   identity = next;
   sessionPrivateJwk = payload.privateKey;
   keyCache.clear();
   groupCtxs.clear();
-  await api.registerCryptoIdentity(next.publicKey);
+  await api.registerCryptoIdentity(next.userId, next.publicKey, undefined, signal);
 };
 
 const wrapKey = async (chatId: string, recipientId: string, creatorId: string, publicJwk: JsonWebKey, rawKey: Uint8Array) => {
