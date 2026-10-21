@@ -21,6 +21,7 @@ import { registerRegistration } from './registration.js';
 import { registerAttachments } from './attachments/index.js';
 import { startServer } from './tls.js';
 import { migrateMfaSecrets } from './totp.js';
+import { safeLoggerOptions } from './requestLog.js';
 
 // npm may place Fastify itself inside this workspace while hoisting plugins to the
 // monorepo root. Keep their runtime decorations visible to the workspace compiler.
@@ -42,7 +43,7 @@ declare module 'fastify' {
 await runMigrations();
 await migrateMfaSecrets();
 const app = Fastify({
-  logger: true,
+  logger: safeLoggerOptions,
   trustProxy: config.isProduction ? '127.0.0.1' : false
 });
 

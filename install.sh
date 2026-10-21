@@ -667,10 +667,22 @@ EOF
   cat <<EOF
 # Managed by tel-messenger install.sh
 map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
+map \$uri \$nosignal_safe_uri {
+  ~*^/api/invites/[^/]+/accept /api/invites/[redacted]/accept;
+  ~*^/api/invites/[^/]+ /api/invites/[redacted];
+  ~*^/api/channels/join/[^/]+ /api/channels/join/[redacted];
+  ~*^/join/[^/]+ /join/[redacted];
+  ~*^/c/[^/]+ /c/[redacted];
+  default \$uri;
+}
+log_format nosignal_safe '\$remote_addr [\$time_local] "\$request_method \$nosignal_safe_uri \$server_protocol" \$status \$body_bytes_sent';
 server {
   listen 80;
   listen [::]:80;
   server_name $DOMAIN;
+  access_log /var/log/nginx/tel-messenger-access.log nosignal_safe;
+  # Nginx error logs can include the raw request URI and Referer.
+  error_log /dev/null crit;
   location /.well-known/acme-challenge/ { root $ACME_ROOT; }
 $(if [[ $tls == true ]]; then echo '  location / { return 301 https://$host$request_uri; }'; else echo "$proxy_block"; fi)
 }
@@ -679,6 +691,8 @@ server {
   listen 443 ssl http2;
   listen [::]:443 ssl http2;
   server_name $DOMAIN;
+  access_log /var/log/nginx/tel-messenger-access.log nosignal_safe;
+  error_log /dev/null crit;
   ssl_certificate     /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
   ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
   ssl_protocols TLSv1.2 TLSv1.3;
