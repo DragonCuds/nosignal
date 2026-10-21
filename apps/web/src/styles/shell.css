@@ -133,3 +133,5 @@
 
 .backup-warning { position: fixed; inset-inline: 12px; bottom: 12px; z-index: 30; max-width: 420px; background: var(--surface, var(--bg)); border-radius: 12px; box-shadow: 0 6px 24px rgba(0, 0, 0, .35); }
 .backup-warning:empty { display: none; }
+.backup-warning--save { padding: 12px 14px; font-size: 13px; line-height: 1.7; }
+.backup-warning--save p { margin: 4px 0 0; color: var(--text-2); }

@@ -57,6 +57,14 @@ after(async () => {
   await rm(dataDir, { recursive: true, force: true });
 });
 
+test('register keeps Persian displayName with ZWNJ intact', async () => {
+  const name = 'بچه\u200cهای دانشگاه';
+  const response = await register({ username: 'zwnj_user', password: 'correct-horse', displayName: name });
+  assert.equal(response.statusCode, 204, response.body);
+  const me = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie: cookieOf(response) } });
+  assert.equal(me.json().displayName, name);
+});
+
 test('register creates a non-admin user, sets a session, and login works', async () => {
   const response = await register({ username: 'Alice_1', password: 'correct-horse', displayName: 'Alice' });
   assert.equal(response.statusCode, 204, response.body);

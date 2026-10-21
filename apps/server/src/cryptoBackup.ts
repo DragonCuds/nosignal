@@ -15,6 +15,14 @@ export const BACKUP_MAX_WRAPPED = 4_096; // a P-256 private JWK payload wraps to
 const b64 = (value: unknown, min: number, max: number): value is string =>
   typeof value === 'string' && value.length >= min && value.length <= max && /^[A-Za-z0-9_-]+$/.test(value);
 
+/** Validates a wrapped-key blob ({salt, iterations, wrapped, version}); null when malformed. */
+export const parseBackupBlob = (body: { salt?: unknown; iterations?: unknown; wrapped?: unknown; version?: unknown } | null | undefined): { salt: string; iterations: number; wrapped: string } | null => {
+  const { salt, iterations, wrapped, version } = body ?? {};
+  if (!b64(salt, 16, 64) || !b64(wrapped, 40, BACKUP_MAX_WRAPPED) || version !== 1
+    || !Number.isInteger(iterations) || (iterations as number) < BACKUP_MIN_ITERATIONS || (iterations as number) > BACKUP_MAX_ITERATIONS) return null;
+  return { salt, iterations: iterations as number, wrapped };
+};
+
 type Row = { mode: 'auto' | 'manual'; salt: string | null; iterations: number | null; wrapped: string | null; version: number | null; updated_at: string };
 
 const view = (row: Row) => ({
@@ -36,11 +44,9 @@ export const registerCryptoBackupRoutes = async (app: FastifyInstance): Promise<
   app.put<{ Body: { salt?: unknown; iterations?: unknown; wrapped?: unknown; version?: unknown } }>('/api/crypto/backup', {
     config: { rateLimit: WRITE_LIMIT }, preHandler: app.requireUser, bodyLimit: 16 * 1024
   }, async (request, reply) => {
-    const { salt, iterations, wrapped, version } = request.body ?? {};
-    if (!b64(salt, 16, 64) || !b64(wrapped, 40, BACKUP_MAX_WRAPPED) || version !== 1
-      || !Number.isInteger(iterations) || (iterations as number) < BACKUP_MIN_ITERATIONS || (iterations as number) > BACKUP_MAX_ITERATIONS) {
-      return reply.code(400).send({ error: 'Invalid key backup' });
-    }
+    const blob = parseBackupBlob(request.body);
+    if (!blob) return reply.code(400).send({ error: 'Invalid key backup' });
+    const { salt, iterations, wrapped } = blob;
     await db.query(
       `INSERT INTO user_crypto_backups (user_id, mode, salt, iterations, wrapped, version, updated_at)
        VALUES ($1, 'auto', $2, $3, $4, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))

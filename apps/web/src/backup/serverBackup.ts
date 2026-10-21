@@ -1,11 +1,11 @@
 // Automatic key backup (default "Auto" mode): the identity key is wrapped in the browser with a key
 // derived from the login password and stored on the server; a new browser gets it back at login.
 import { api, ApiError } from '../api.js';
-import { exportLocalIdentity, hasLocalIdentity, importIdentity, initializeEncryption } from '../e2ee.js';
+import { exportLocalIdentity, hasLocalIdentity, importIdentity, initializeIdentity } from '../e2ee.js';
 import { unwrapFromServer, wrapForServer, type BackupPayload } from './crypto.js';
 
 export type ServerBackupState = Awaited<ReturnType<typeof api.cryptoBackup>> | null;
-export type LoginBackupResult = 'restored' | 'uploaded' | 'unchanged' | 'manual' | 'needs-choice' | 'unexportable' | 'offline';
+export type LoginBackupResult = 'restored' | 'created' | 'uploaded' | 'pending' | 'unchanged' | 'manual' | 'needs-choice' | 'unexportable' | 'offline';
 
 /** null = this account never stored anything on the server. */
 export const fetchServerBackup = async (): Promise<ServerBackupState> => {
@@ -21,16 +21,91 @@ export const uploadBackup = async (payload: BackupPayload, password: string): Pr
   await api.putCryptoBackup(await wrapForServer(payload, password));
 };
 
+// ---- "Not saved yet" tracking ------------------------------------------------------------------------
+// When the first upload fails (offline, server hiccup) the wrapped key is retried in the background while this
+// page lives (the password stays in memory only), and the UI shows a warning until the server holds a copy.
+let pending = false;
+let retry: { userId: string; password: string; timer: number; tries: number } | null = null;
+const listeners = new Set<() => void>();
+const setPending = (value: boolean) => { if (pending !== value) { pending = value; listeners.forEach((fn) => fn()); } };
+export const isBackupPending = (): boolean => pending;
+export const subscribeBackupPending = (fn: () => void): (() => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; };
+
+const stopRetry = () => {
+  if (retry) { window.clearInterval(retry.timer); retry = null; }
+  window.removeEventListener('online', attemptRetry);
+  setPending(false);
+};
+
+/** True when the server now holds a usable copy (or the account deliberately opted out). */
+const settle = async (userId: string, password: string): Promise<boolean> => {
+  const remote = await fetchServerBackup();
+  if (remote?.mode === 'manual') return true;
+  const mine = await exportLocalIdentity(userId);
+  if (!mine) return true; // nothing exportable (old non-extractable key)
+  if (remote?.backup) {
+    try { if (samePublic((await unwrapFromServer(remote.backup, password, userId)).publicKey, mine.publicKey)) return true; } catch { /* stale: replace */ }
+  }
+  await uploadBackup(mine, password);
+  return true;
+};
+
+function attemptRetry(): void {
+  const job = retry;
+  if (!job) return;
+  job.tries += 1;
+  void settle(job.userId, job.password).then(() => { if (retry === job) stopRetry(); }).catch(() => { if (retry === job && job.tries >= 120) stopRetry(); });
+}
+
+const queueRetry = (userId: string, password: string): void => {
+  setPending(true);
+  if (retry) { window.clearInterval(retry.timer); }
+  retry = { userId, password, tries: 0, timer: window.setInterval(attemptRetry, 6000) };
+  window.addEventListener('online', attemptRetry);
+};
+
+/** Upload now; on failure keep retrying in the background and flag it. Never throws. */
+const uploadOrQueue = async (userId: string, password: string): Promise<'uploaded' | 'pending'> => {
+  try { await settle(userId, password); stopRetry(); return 'uploaded'; } catch { queueRetry(userId, password); return 'pending'; }
+};
+
+/**
+ * Creates the identity key if this browser has none and makes sure the server holds the password-wrapped copy
+ * IMMEDIATELY: a fresh key travels to the server together with its backup in one request.
+ * 'conflict' = the account already has an identity this browser cannot open (no usable copy).
+ */
+export const ensureKeyAndBackup = async (userId: string, password: string): Promise<'saved' | 'pending' | 'conflict' | 'manual' | 'offline'> => {
+  try {
+    const result = await initializeIdentity(userId, (payload) => wrapForServer(payload, password));
+    if (result.created && result.backupSaved) return 'saved';
+    const state = await uploadOrQueue(userId, password);
+    return state === 'uploaded' ? 'saved' : 'pending';
+  } catch (caught) {
+    if (caught instanceof ApiError && caught.status === 409) return 'conflict';
+    try {
+      if (await hasLocalIdentity(userId)) { queueRetry(userId, password); return 'pending'; } // key exists locally; registration is retried by the app
+    } catch { /* ignore */ }
+    return 'offline';
+  }
+};
+
 /**
  * Runs right after a successful PASSWORD login (the only moment the password is at hand).
- * Never throws: a failure here must not block login; the next login retries.
+ * Never throws: a failure here must not block login; it is retried in the background and at the next login.
  */
 export const syncBackupAfterLogin = async (userId: string, password: string): Promise<LoginBackupResult> => {
   try {
     const remote = await fetchServerBackup();
     const local = await hasLocalIdentity(userId);
     if (!local) {
-      if (!remote?.backup) return 'needs-choice';
+      if (!remote?.backup) {
+        if (remote?.mode === 'manual') return 'needs-choice';
+        // No key here and no server copy: either a brand-new account (e.g. registered over the API) or a lost key.
+        // Try to create the first key now and store its backup in the same request; a 409 means "lost key".
+        const made = await ensureKeyAndBackup(userId, password);
+        if (made === 'conflict') return 'needs-choice';
+        return made === 'saved' ? 'created' : made === 'pending' ? 'pending' : 'offline';
+      }
       try {
         await importIdentity(await unwrapFromServer(remote.backup, password, userId));
         return 'restored';
@@ -45,16 +120,11 @@ export const syncBackupAfterLogin = async (userId: string, password: string): Pr
         if (samePublic(stored.publicKey, mine.publicKey)) return 'unchanged';
       } catch { /* password changed or stale copy: wrap again below */ }
     }
-    await uploadBackup(mine, password);
-    return 'uploaded';
+    return await uploadOrQueue(userId, password);
   } catch { return 'offline'; }
 };
 
-/** New account: make the identity now (the messenger would do it a moment later anyway) and back it up. */
+/** New account (signup form or invite): make the identity now and store its password-wrapped copy before the app opens. */
 export const setupBackupAfterSignup = async (userId: string, password: string): Promise<void> => {
-  try {
-    await initializeEncryption(userId);
-    const mine = await exportLocalIdentity(userId);
-    if (mine) await uploadBackup(mine, password);
-  } catch { /* retried at the next password login */ }
+  await ensureKeyAndBackup(userId, password);
 };

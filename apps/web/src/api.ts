@@ -203,7 +203,7 @@ export const api = {
   usernameAvailable: (u: string, signal?: AbortSignal) => request<{ available: boolean; valid: boolean }>(`/api/username-available?${new URLSearchParams({ u })}`, { signal }),
   register: (username: string, password: string, displayName?: string) =>
     request<void>('/api/register', { method: 'POST', body: JSON.stringify({ username, password, displayName }) }),
-  registerCryptoIdentity: (publicKey: JsonWebKey) => request<{ fingerprint: string }>('/api/crypto/identity', { method: 'PUT', body: JSON.stringify({ publicKey }) }),
+  registerCryptoIdentity: (publicKey: JsonWebKey, backup?: { salt: string; iterations: number; wrapped: string; version: 1 }) => request<{ fingerprint: string; backupSaved?: boolean }>('/api/crypto/identity', { method: 'PUT', body: JSON.stringify(backup ? { publicKey, backup } : { publicKey }) }),
   cryptoBackup: () => request<{ mode: 'auto' | 'manual'; backup: { salt: string; iterations: number; wrapped: string; version: 1 } | null; updatedAt: string }>('/api/crypto/backup'),
   putCryptoBackup: (blob: { salt: string; iterations: number; wrapped: string; version: 1 }) => request<void>('/api/crypto/backup', { method: 'PUT', body: JSON.stringify(blob) }),
   deleteCryptoBackup: () => request<void>('/api/crypto/backup', { method: 'DELETE' }),

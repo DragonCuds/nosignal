@@ -1,3 +1,4 @@
+import { setupBackupAfterSignup } from '../backup/serverBackup.js';
 import { useEffect, useState, type FormEvent } from 'react';
 import { api, ApiError, type User } from '../api.js';
 import { ChatIcon, LockIcon, MoonIcon, SunIcon } from '../icons.js';
@@ -52,7 +53,9 @@ export function JoinPage({ token, theme, onToggleTheme, onJoined }: Props) {
     setError('');
     try {
       await acceptInvite(token, { username: name, displayName: displayName.trim(), password });
-      onJoined(await api.me());
+      const me = await api.me();
+      await setupBackupAfterSignup(me.id, password); // key + password-wrapped backup are stored before the app opens (never throws)
+      onJoined(me);
     } catch (caught) {
       setError(errorText(caught));
       setSubmitting(false);

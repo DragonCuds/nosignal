@@ -61,6 +61,13 @@ after(async () => {
 
 const state = {};
 
+test('channel title accepts ZWNJ/ZWJ but rejects other format chars', async () => {
+  const fa = await send('owner', 'POST', '/api/channels', { title: 'کانال می\u200cخواهم' });
+  assert.equal(fa.statusCode, 201, fa.body);
+  assert.equal((await send('owner', 'POST', '/api/channels', { title: 'a\u200db' })).statusCode, 201);
+  for (const bad of ['a\u202eb', 'a\u0000b', 'a\u200bb']) assert.equal((await send('owner', 'POST', '/api/channels', { title: bad })).statusCode, 400);
+});
+
 test('create channel, invite, join, list', async () => {
   assert.equal((await send('owner', 'POST', '/api/channels', { title: '  ' })).statusCode, 400);
   const created = await send('owner', 'POST', '/api/channels', { title: 'News' });

@@ -67,6 +67,15 @@ after(async () => {
 
 const state = {};
 
+test('group title accepts ZWNJ/ZWJ (Persian) but rejects other control/format chars', async () => {
+  const fa = await send('owner', 'POST', '/api/groups', { title: 'بچه\u200cهای دانشگاه', memberIds: [ids.bob] });
+  assert.equal(fa.statusCode, 201, fa.body);
+  assert.equal((await send('owner', 'POST', '/api/groups', { title: 'a\u200db', memberIds: [ids.bob] })).statusCode, 201);
+  for (const bad of ['a\u202eb', 'a\u0000b', 'a\u200bb', 'a\u2066b']) {
+    assert.equal((await send('owner', 'POST', '/api/groups', { title: bad, memberIds: [ids.bob] })).statusCode, 400, JSON.stringify(bad));
+  }
+});
+
 test('create group: validation, owner, list, keys', async () => {
   assert.equal((await send('owner', 'POST', '/api/groups', { title: ' ', memberIds: [ids.bob] })).statusCode, 400);
   assert.equal((await send('owner', 'POST', '/api/groups', { title: 'G', memberIds: [] })).statusCode, 400);

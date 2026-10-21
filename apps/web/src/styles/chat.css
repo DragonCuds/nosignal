@@ -27,7 +27,7 @@
 .chat-header__search input { background: transparent; border: 0; color: var(--text); flex: 1; height: 38px; min-width: 0; outline: 0; }
 .chat-header__count { color: var(--text-2); flex: none; font-size: 12px; }
 .chat-header__info { position: relative; }
-.popover { background: var(--surface); border-radius: 14px; box-shadow: var(--shadow-pop); inset-block-start: calc(100% + 10px); inset-inline-end: 0; direction: rtl; padding: 14px; position: absolute; width: 292px; z-index: 30; animation: pop var(--dur-fast) var(--ease-out) both; transform-origin: top right; }
+.popover { background: var(--surface); border-radius: 14px; box-shadow: var(--shadow-pop); inset-block-start: calc(100% + 10px); left: auto; right: 0; max-width: calc(100vw - 24px); direction: rtl; padding: 14px; position: absolute; width: 292px; z-index: 30; animation: pop var(--dur-fast) var(--ease-out) both; transform-origin: top right; }
 .popover__title { align-items: center; color: var(--success); display: flex; font-weight: 600; gap: 8px; }
 .popover__title svg { height: 18px; width: 18px; }
 .popover p { color: var(--text-2); font-size: 13px; line-height: 1.8; margin: 8px 0; }

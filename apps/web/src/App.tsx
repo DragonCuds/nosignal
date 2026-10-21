@@ -13,6 +13,7 @@ import { JoinPage, inviteTokenFromPath } from './join/JoinPage.js';
 import { RecoveryScreen } from './backup/RecoveryScreen.js';
 import { fetchServerBackup, uploadBackup } from './backup/serverBackup.js';
 import { BackupWarning } from './backup/BackupWarning.js';
+import { BackupSaveNotice } from './backup/BackupSaveNotice.js';
 import { CreateGroupDialog } from './groups/CreateGroupDialog.js';
 import { CreateChannelDialog } from './channels/CreateChannelDialog.js';
 import { ChannelJoin } from './channels/ChannelJoin.js';
@@ -216,6 +217,7 @@ function Messenger({ initialChatId, user, theme, onToggleTheme, onLogout }: Mess
         onSelect={setSelectedId} onOpenSaved={openSaved} onOpenChatWith={openChatWith} onRetry={() => void loadChats()} onNewChat={() => setNewChatOpen(true)} onNewChannel={() => setNewChannelOpen(true)} onNewGroup={() => setNewGroupOpen(true)}
         onSettings={() => setSettingsOpen(true)} onToggleTheme={onToggleTheme} onLogout={onLogout}
       />
+      <BackupSaveNotice ready={cryptoOk} />
       {canBackup && powerMode && <div className="backup-warning"><BackupWarning userId={user.id} onBackup={() => setSettingsOpen(true)} /></div>}
       <section className="chat-pane" aria-label="گفتگو">
         {selected && !cryptoOk

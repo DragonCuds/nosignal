@@ -1,4 +1,4 @@
-import { generateBackupablePair, toExtractable, type BackupPayload } from './backup/crypto.js';
+import { generateBackupablePair, toExtractable, type BackupPayload, type ServerBackupBlob } from './backup/crypto.js';
 import { api, ApiError, type ChatMessageSummary, type Message, type OutboundEncryptedPayload } from './api.js';
 import { groupsApi, type GroupDetail } from './groups/groupsApi.js';
 
@@ -96,23 +96,43 @@ const fingerprint = async (jwk: JsonWebKey): Promise<string> => {
 
 export const hasLocalIdentity = async (userId: string): Promise<boolean> => Boolean(await dbGet(userId));
 
-export const initializeEncryption = async (userId: string): Promise<string> => {
+export type InitResult = { fingerprint: string; created: boolean; backupSaved: boolean };
+
+/**
+ * Loads (or, on first use, creates) this device's identity and registers its public half on the server.
+ * With `wrap`, a freshly created key is sent together with its password-wrapped backup so the server stores
+ * both in one transaction (no window in which the server knows the identity but holds no recoverable copy).
+ */
+export const initializeIdentity = async (userId: string, wrap?: (payload: BackupPayload) => Promise<ServerBackupBlob>): Promise<InitResult> => {
   groupCtxs.clear();
   const stored = await dbGet(userId);
+  let created = false;
   if (stored) identity = stored;
   else {
     const pair = await generateBackupablePair();
     sessionPrivateJwk = pair.privateJwk;
     identity = { userId, privateKey: await toExtractable(pair.privateJwk), publicKey: pair.publicJwk, fingerprint: await fingerprint(pair.publicJwk) };
     await dbPut(identity);
+    created = true;
   }
-  try { await api.registerCryptoIdentity(identity.publicKey); } catch (caught) {
+  let blob: ServerBackupBlob | undefined;
+  if (created && wrap) {
+    try {
+      const payload = await payloadOf(identity, sessionPrivateJwk);
+      if (payload) blob = await wrap(payload);
+    } catch { /* registered without a backup; the caller queues the upload */ }
+  }
+  try {
+    const result = await api.registerCryptoIdentity(identity.publicKey, blob);
+    return { fingerprint: identity.fingerprint, created, backupSaved: Boolean(result.backupSaved) };
+  } catch (caught) {
     // The account is already bound to another identity (this browser lost its key): do not keep a useless new key here.
     if (!stored && caught instanceof ApiError && caught.status === 409) { await dbDelete(userId); identity = undefined; sessionPrivateJwk = undefined; }
     throw caught;
   }
-  return identity.fingerprint;
 };
+
+export const initializeEncryption = async (userId: string): Promise<string> => (await initializeIdentity(userId)).fingerprint;
 
 /** Current identity as a backup payload; null only for an old key that was stored non-extractable. */
 export const getBackup = async (): Promise<BackupPayload | null> => {

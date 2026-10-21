@@ -19,7 +19,7 @@ const parseId = (value: unknown): string | null => {
 const parseTitle = (value: unknown): string | null => {
   if (typeof value !== 'string') return null;
   const title = value.normalize('NFC').replace(/\s+/g, ' ').trim();
-  return title.length >= 1 && title.length <= 80 && !/\p{C}/u.test(title) ? title : null;
+  return title.length >= 1 && title.length <= 80 && !/(?![\u200C\u200D])\p{C}/u.test(title) ? title : null;
 };
 const hashToken = (token: string): string => createHash('sha256').update(token).digest('hex');
 

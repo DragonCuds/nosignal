@@ -37,7 +37,7 @@ export const messagePreview = (chat: Chat, currentUserId: string): { prefix?: st
 function ChatRow({ chat, currentUserId, selected, online, onSelect }: { chat: Chat; currentUserId: string; selected: boolean; online: boolean; onSelect: () => void }) {
   const preview = messagePreview(chat, currentUserId);
   if (!chat.lastMessage && chat.type === 'saved') preview.text = 'پیام، فایل و یادداشت‌های خودتان';
-  const activity = chat.lastMessage?.createdAt ?? chat.createdAt;
+  const activity = chat.lastMessage?.createdAt ?? (chat.type === 'saved' ? null : chat.createdAt);
   const mine = chat.lastMessage?.senderId === currentUserId;
   const channel = chat.type === 'channel';
   if (channel && !chat.lastMessage) preview.text = 'هنوز پستی منتشر نشده';
@@ -50,7 +50,7 @@ function ChatRow({ chat, currentUserId, selected, online, onSelect }: { chat: Ch
       <span className="chat-row__body">
         <span className="chat-row__top">
           <strong dir="auto">{group ? chat.title ?? 'گروه' : channel ? chat.title ?? 'کانال' : saved || !chat.peer ? SAVED_TITLE : chat.peer.displayName}</strong>
-          <span className="chat-row__time">{mine && <CheckIcon />}<time dateTime={activity}>{listTimeLabel(activity)}</time></span>
+          <span className="chat-row__time">{mine && <CheckIcon />}{activity && <time dateTime={activity}>{listTimeLabel(activity)}</time>}</span>
         </span>
         <span className="chat-row__bottom">
           <span className="chat-row__preview" dir="auto">{preview.prefix && <span className="chat-row__you">{preview.prefix}</span>}{withEmoji(preview.text)}</span>

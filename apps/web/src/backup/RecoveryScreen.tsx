@@ -79,6 +79,10 @@ export function RecoveryScreen({ userId, onRestored, onFresh, onLogout }: Props)
       <h1>کلید رمزنگاری این دستگاه پیدا نشد</h1>
       <p className="login__lead">برای خواندن پیام‌های قبلی یکی از این راه‌ها را انتخاب کنید. هر کدام جواب داد، لازم نیست بقیه را انجام دهید.</p>
 
+      {serverCopy === 'no' && (
+        <p className="group__lead" role="note"><strong>هیچ نسخهٔ پشتیبانی از کلید این حساب روی سرور نیست.</strong> اگر کلید یا فایل بازیابی ندارید و این حساب را روی دستگاه دیگری هم باز نکرده‌اید، گزینهٔ «شروع تازه» پایین همین صفحه را بزنید تا با کلید جدید ادامه دهید.</p>
+      )}
+
       {serverCopy === 'yes' && (
         <form className="group" onSubmit={restoreWithPassword}>
           <h3>۱. بازیابی با رمز عبور حساب</h3>

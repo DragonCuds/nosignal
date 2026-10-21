@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { db } from './db.js';
+import { parseBackupBlob } from './cryptoBackup.js';
 
 const READ_LIMIT = { max: 120, timeWindow: '1 minute' } as const;
 const WRITE_LIMIT = { max: 20, timeWindow: '1 minute' } as const;
@@ -20,19 +21,45 @@ const isMember = async (chatId: string, userId: string): Promise<boolean> =>
   (await db.query('SELECT 1 FROM chat_members WHERE chat_id = $1 AND user_id = $2', [chatId, userId])).rowCount === 1;
 
 export const registerCryptoRoutes = async (app: FastifyInstance): Promise<void> => {
-  app.put<{ Body: { publicKey?: unknown } }>('/api/crypto/identity', { preHandler: app.requireUser, config: { rateLimit: WRITE_LIMIT } }, async (request, reply) => {
+  // `backup` (optional) is the password-wrapped copy of the new private key. It is stored in the SAME transaction
+  // as a brand-new identity, so the server never knows an identity whose key has no recoverable copy (unless the
+  // account chose manual mode). Ignored when the identity already exists.
+  app.put<{ Body: { publicKey?: unknown; backup?: unknown } }>('/api/crypto/identity', { preHandler: app.requireUser, config: { rateLimit: WRITE_LIMIT }, bodyLimit: 16 * 1024 }, async (request, reply) => {
     if (!validPublicJwk(request.body?.publicKey)) return reply.code(400).send({ error: 'Invalid P-256 public key' });
     const key = { kty: 'EC', crv: 'P-256', x: request.body.publicKey.x, y: request.body.publicKey.y } satisfies JsonWebKey;
     const hash = fingerprint(key);
-    const result = await db.query<{ fingerprint: string }>(
-      `INSERT INTO user_crypto_identities (user_id, public_jwk, fingerprint)
-       VALUES ($1, json($2), $3)
-       ON CONFLICT (user_id) DO UPDATE SET public_jwk = user_crypto_identities.public_jwk
-       RETURNING fingerprint`,
-      [request.user!.id, JSON.stringify(key), hash]
-    );
-    if (result.rows[0].fingerprint !== hash) return reply.code(409).send({ error: 'This account is already bound to another encryption identity' });
-    return { fingerprint: hash };
+    const rawBackup = request.body.backup;
+    const backup = rawBackup === undefined || rawBackup === null ? null : parseBackupBlob(object(rawBackup) ? rawBackup : null);
+    if (rawBackup !== undefined && rawBackup !== null && !backup) return reply.code(400).send({ error: 'Invalid key backup' });
+    const userId = request.user!.id;
+    let backupSaved = false;
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const existing = (await client.query<{ fingerprint: string }>('SELECT fingerprint FROM user_crypto_identities WHERE user_id = $1', [userId])).rows[0];
+      if (existing) {
+        await client.query('COMMIT');
+        if (existing.fingerprint !== hash) return reply.code(409).send({ error: 'This account is already bound to another encryption identity' });
+        return { fingerprint: hash, backupSaved: false };
+      }
+      await client.query(
+        `INSERT INTO user_crypto_identities (user_id, public_jwk, fingerprint) VALUES ($1, json($2), $3)`,
+        [userId, JSON.stringify(key), hash]
+      );
+      const mode = (await client.query<{ mode: string }>('SELECT mode FROM user_crypto_backups WHERE user_id = $1', [userId])).rows[0]?.mode;
+      if (backup && (mode === undefined || mode === 'auto')) {
+        backupSaved = true;
+        await client.query(
+          `INSERT INTO user_crypto_backups (user_id, mode, salt, iterations, wrapped, version, updated_at)
+           VALUES ($1, 'auto', $2, $3, $4, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+           ON CONFLICT (user_id) DO UPDATE SET salt = excluded.salt, iterations = excluded.iterations, wrapped = excluded.wrapped,
+             version = 1, updated_at = excluded.updated_at WHERE user_crypto_backups.mode = 'auto'`,
+          [userId, backup.salt, backup.iterations, backup.wrapped]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+    return { fingerprint: hash, backupSaved };
   });
 
   app.get<{ Params: { id: string } }>('/api/chats/:id/crypto', { preHandler: app.requireUser, config: { rateLimit: READ_LIMIT } }, async (request, reply) => {
