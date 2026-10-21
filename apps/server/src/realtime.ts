@@ -1,21 +1,31 @@
 import type { RealtimeClientEvent, RealtimeServerEvent } from '@tel-messenger/media-contract';
 import type { IncomingMessage } from 'node:http';
+import { isIP } from 'node:net';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { FastifyInstance } from 'fastify';
 import { db } from './db.js';
+import { config } from './config.js';
 import { currentTokenHash, getSessionUserForToken, isSessionTokenHashValid, isTrustedOrigin, onSessionsRevoked, tokenHash as hashToken, type SessionRevocation } from './auth.js';
 
 const SESSION_COOKIE = 'tel_session';
 const HEARTBEAT_MS = 25_000;
 const MAX_CLIENT_EVENTS_PER_WINDOW = 20;
 const CLIENT_EVENT_WINDOW_MS = 10_000;
+const WS_AUTH_TIMEOUT_MS = 5_000;
+const WS_MAX_PENDING = 64;
+const WS_MAX_PENDING_PER_IP = 8;
+const WS_MAX_CONNECTIONS_PER_IP = 32;
+const WS_MAX_CONNECTIONS_PER_USER = 12;
+const WS_MAX_CONNECTIONS_PER_SESSION = 6;
+const WS_MAX_CONNECTIONS = 512;
+const WS_MAX_BUFFERED = 1024 * 1024;
 
 const SSE_KEEPALIVE_MS = 15_000;
 const SSE_MAX_BUFFERED = 1024 * 1024;
 
 // One connected client, over WebSocket or SSE. `send` never throws.
 // `tokenHash` identifies the session the connection was authenticated with; `close` ends it (WS code 4401 / SSE end).
-type SocketState = { socket?: WebSocket; userId: string; tokenHash: string | null; alive: boolean; events: number[]; send(event: RealtimeServerEvent): void; close(): void };
+type SocketState = { socket?: WebSocket; userId: string; tokenHash: string | null; ip?: string; alive: boolean; events: number[]; send(event: RealtimeServerEvent): void; close(): void };
 type RealtimeService = {
   broadcastToChat(chatId: string, event: RealtimeServerEvent): void;
   /** Close live connections of revoked sessions: one session (tokenHash) or all of userId except exceptTokenHash. */
@@ -35,8 +45,18 @@ declare module 'fastify' {
 }
 
 const validId = (value: unknown): value is string => typeof value === 'string' && /^[1-9]\d*$/.test(value);
-const send = (socket: WebSocket, event: RealtimeServerEvent): void => {
-  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event));
+export const send = (socket: WebSocket, event: RealtimeServerEvent): void => {
+  if (socket.readyState !== WebSocket.OPEN) return;
+  try {
+    const payload = JSON.stringify(event);
+    if (socket.bufferedAmount + Buffer.byteLength(payload) > WS_MAX_BUFFERED) {
+      socket.terminate();
+      return;
+    }
+    socket.send(payload, (error) => { if (error) socket.terminate(); });
+  } catch {
+    socket.terminate();
+  }
 };
 const isPing = (event: unknown): event is { type: 'ping'; t: number } =>
   typeof event === 'object' && event !== null && (event as { type?: unknown }).type === 'ping' && typeof (event as { t?: unknown }).t === 'number' && Number.isFinite((event as { t: number }).t);
@@ -77,8 +97,23 @@ const presenceAudience = async (userId: string): Promise<Set<string>> => {
 };
 
 export const registerRealtime = async (app: FastifyInstance): Promise<void> => {
+  // Bound the HTTP header phase too; the upgrade listener runs only after headers arrive.
+  app.server.headersTimeout = Math.min(app.server.headersTimeout, 10_000);
   const sockets = new Set<SocketState>();
+  const pending = new Set<import('node:stream').Duplex>();
+  const pendingByIp = new Map<string, number>();
   const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 });
+  // The installer overwrites X-Real-IP at the loopback proxy. A public or
+  // non-loopback peer can never choose the address used for the per-IP limit.
+  const peerIp = (request: IncomingMessage): string => {
+    const remote = request.socket.remoteAddress ?? 'unknown';
+    const real = request.headers['x-real-ip'];
+    if (config.isProduction && config.tlsMode === 'off' &&
+        (remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1')) {
+      if (typeof real === 'string' && isIP(real)) return real;
+    }
+    return remote;
+  };
   const onlineElsewhere = (userId: string): boolean => [...sockets].some((state) => state.userId === userId);
   const broadcastPresence = async (userId: string, online: boolean, lastSeen: string | null): Promise<void> => {
     const audience = await presenceAudience(userId);
@@ -131,8 +166,10 @@ export const registerRealtime = async (app: FastifyInstance): Promise<void> => {
 
   app.decorate('realtime', {
     broadcastToChat(chatId, event) {
-      for (const state of sockets) void isChatMember(chatId, state.userId).then((member) => {
-        if (member) state.send(event);
+      if (!sockets.size) return;
+      void db.query<{ user_id: string }>('SELECT user_id FROM chat_members WHERE chat_id = $1', [chatId]).then((result) => {
+        const members = new Set(result.rows.map((row) => row.user_id));
+        for (const state of sockets) if (members.has(state.userId)) state.send(event);
       }).catch((error: unknown) => app.log.error(error, 'Failed to deliver realtime event'));
     },
     closeSessionConnections,
@@ -142,8 +179,8 @@ export const registerRealtime = async (app: FastifyInstance): Promise<void> => {
     }
   });
 
-  wss.on('connection', (socket: WebSocket, _request: IncomingMessage, userId: string, tokenHash: string) => {
-    const state: SocketState = { socket, userId, tokenHash, alive: true, events: [], send: (event) => send(socket, event), close: () => socket.close(WS_CLOSE_SESSION_REVOKED, 'session revoked') };
+  wss.on('connection', (socket: WebSocket, _request: IncomingMessage, userId: string, tokenHash: string, ip: string) => {
+    const state: SocketState = { socket, userId, tokenHash, ip, alive: true, events: [], send: (event) => send(socket, event), close: () => socket.close(WS_CLOSE_SESSION_REVOKED, 'session revoked') };
     connect(state);
     socket.on('pong', () => { state.alive = true; });
     socket.on('message', (data: WebSocket.RawData) => {
@@ -222,21 +259,63 @@ export const registerRealtime = async (app: FastifyInstance): Promise<void> => {
   heartbeat.unref();
 
   app.server.on('upgrade', (request, socket, head) => {
-    if (new URL(request.url ?? '/', 'http://localhost').pathname !== '/ws') return;
-    if (!isTrustedOrigin(request.headers.origin)) {
-      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); socket.destroy(); return;
+    const reject = (status: string): void => {
+      if (!socket.destroyed) socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+    };
+    try {
+      const url = new URL(request.url ?? '/', 'http://localhost');
+      if (url.pathname !== '/ws') { reject('404 Not Found'); return; }
+      if (!isTrustedOrigin(request.headers.origin)) { reject('403 Forbidden'); return; }
+      const ip = peerIp(request);
+      if (pending.size >= WS_MAX_PENDING || (pendingByIp.get(ip) ?? 0) >= WS_MAX_PENDING_PER_IP) { reject('503 Service Unavailable'); return; }
+      const token = app.parseCookie(request.headers.cookie ?? '')[SESSION_COOKIE];
+      if (!token) { reject('401 Unauthorized'); return; }
+      const tokenHash = hashToken(token);
+      pending.add(socket);
+      pendingByIp.set(ip, (pendingByIp.get(ip) ?? 0) + 1);
+      const release = (): void => {
+        if (!pending.delete(socket)) return;
+        const count = (pendingByIp.get(ip) ?? 1) - 1;
+        if (count) pendingByIp.set(ip, count); else pendingByIp.delete(ip);
+        clearTimeout(deadline);
+        socket.off('close', release);
+        socket.off('error', onError);
+      };
+      const onError = (): void => { release(); socket.destroy(); };
+      const deadline = setTimeout(() => { release(); reject('408 Request Timeout'); }, WS_AUTH_TIMEOUT_MS);
+      deadline.unref();
+      socket.once('close', release);
+      socket.once('error', onError);
+      void getSessionUserForToken(token).then((user) => {
+        if (!pending.has(socket) || socket.destroyed) return;
+        if (!user) { release(); reject('401 Unauthorized'); return; }
+        const active = [...sockets].filter((state) => state.socket && state.socket.readyState !== WebSocket.CLOSED);
+        if (active.length >= WS_MAX_CONNECTIONS ||
+            active.filter((state) => state.ip === ip).length >= WS_MAX_CONNECTIONS_PER_IP ||
+            active.filter((state) => state.userId === user.id).length >= WS_MAX_CONNECTIONS_PER_USER ||
+            active.filter((state) => state.tokenHash === tokenHash).length >= WS_MAX_CONNECTIONS_PER_SESSION) {
+          release(); reject('503 Service Unavailable'); return;
+        }
+        try {
+          wss.handleUpgrade(request, socket, head, (websocket) => {
+            release();
+            wss.emit('connection', websocket, request, user.id, tokenHash, ip);
+          });
+        } catch (error) {
+          release();
+          app.log.error(error, 'WebSocket upgrade failed');
+          socket.destroy();
+        }
+      }).catch((error: unknown) => { release(); app.log.error(error, 'WebSocket authentication failed'); socket.destroy(); });
+    } catch {
+      reject('400 Bad Request');
     }
-    const token = app.parseCookie(request.headers.cookie ?? '')[SESSION_COOKIE];
-    if (!token) { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); socket.destroy(); return; }
-    void getSessionUserForToken(token).then((user) => {
-      if (!user) { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); socket.destroy(); return; }
-      wss.handleUpgrade(request, socket, head, (websocket) => wss.emit('connection', websocket, request, user.id, hashToken(token)));
-    }).catch((error: unknown) => { app.log.error(error, 'WebSocket authentication failed'); socket.destroy(); });
   });
 
   app.addHook('onClose', async () => {
     clearInterval(heartbeat);
     clearInterval(typingCleanup);
+    for (const socket of pending) socket.destroy();
     for (const state of sockets) state.socket?.terminate();
     await new Promise<void>((resolve) => wss.close(() => resolve()));
   });

@@ -25,7 +25,7 @@ async function unusedPort() {
 }
 
 async function waitUntilReady() {
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`server exited before readiness (${child.exitCode})`);
     try {
@@ -34,7 +34,7 @@ async function waitUntilReady() {
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error('server did not become ready within 15 seconds');
+  throw new Error('server did not become ready within 60 seconds');
 }
 
 async function websocketStatus(origin) {

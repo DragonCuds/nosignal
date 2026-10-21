@@ -85,6 +85,8 @@ Restrict archives to mode `0600`, keep an encrypted off-host copy, and periodica
 
 If nginx already terminates HTTPS, proxy HTTP to `127.0.0.1:3050`. Preserve `Host` and forwarding headers, use WebSocket upgrade headers for `/ws`, allow the configured upload size, and keep read timeouts above the 25-second heartbeat. Test nginx configuration before reloading it. TLS certificates, DNS, and firewall policy are operator-managed; they are not required for a local-only installation.
 
+The WebSocket server allows up to 6 connections per session, 12 per user, 32 per IP, and 512 overall. Authentication has a 5-second deadline and at most 8 pending upgrades per IP (64 overall). A connection is closed if its outgoing queue exceeds 1 MiB. When nginx runs on the same host, overwrite `X-Real-IP` with `$remote_addr` as the bundled installer does; do not forward a client-supplied value. These limits apply to each server process.
+
 Invite links contain bearer tokens in `/join/<token>`, `/c/<token>`, `/api/invites/<token>` and `/api/channels/join/<token>`. Do not log `$request`, `$request_uri`, `$args` or `$http_referer` in a reverse proxy or tracing system. Log `$uri` after replacing the token segment with `[redacted]`; the bundled installer generates this access-log policy and disables Nginx error logs that can include raw URLs. Apply an equivalent policy to an existing or external proxy before accepting invite traffic. Restrict access to historical logs that may already contain live tokens.
 
 For releases, stop or drain the service, make a backup, run `npm ci`, `npm run build`, and `npm run migrate`, then restart and verify health. Rotating `SESSION_SECRET` logs out every existing session.
