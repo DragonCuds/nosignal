@@ -3,7 +3,8 @@ import { db, safe } from '../db.js';
 import { reportTransfer } from '../datasaver.js';
 import { chunkCount, cipherSize, decryptChunk, importAttachmentKey, unb64u } from './crypto.js';
 import { localBlobs, setProgress } from './progress.js';
-import { downloadChunks, type ChunkStore } from './transfer.js';
+import { getCachedMedia, putCachedMedia } from '../mediaCache.js';
+import { CIPHER_CHUNK, downloadChunks, type ChunkStore } from './transfer.js';
 import type { AttachmentDescriptor } from './types.js';
 
 const CACHE_BYTES = 50 * 1024 * 1024;
@@ -46,13 +47,27 @@ export const loadAttachment = (chatId: string, att: AttachmentDescriptor): Promi
       setProgress(att.id, 0);
       const c = { key: await importAttachmentKey(att.key, ['decrypt']), noncePrefix: unb64u(att.noncePrefix), chatId, id: att.id, size: att.size };
       const last = chunkCount(att.size) - 1;
+      const cached = await getCachedMedia(att.id);
+      if (cached && cached.byteLength === cipherSize(att.size)) {
+        try {
+          const bytes = new Uint8Array(cached);
+          const out: Uint8Array[] = [];
+          for (let n = 0; n <= last; n++) out.push(await decryptChunk(c, n, bytes.subarray(n * CIPHER_CHUNK, Math.min((n + 1) * CIPHER_CHUNK, bytes.length)), n === last));
+          const hitBlob = new Blob(out as BlobPart[], { type: att.mime });
+          sizes.set(att.id, hitBlob.size);
+          trim();
+          return hitBlob;
+        } catch { /* corrupt cache entry: fall through to the network */ }
+      }
+      const raw: Uint8Array[] = [];
       const parts = await downloadChunks({
         id: att.id, total: cipherSize(att.size), store: chunkStore,
-        process: (n, cipher) => decryptChunk(c, n, cipher, n === last),
+        process: (n, cipher) => { raw[n] = cipher; return decryptChunk(c, n, cipher, n === last); },
         onProgress: (done) => setProgress(att.id, done),
         onSample: reportTransfer,
       });
       void chunkStore.clear(att.id);
+      if (raw.length === last + 1 && raw.every(Boolean)) void putCachedMedia(att.id, raw);
       const blob = new Blob(parts as BlobPart[], { type: att.mime });
       sizes.set(att.id, blob.size);
       trim();

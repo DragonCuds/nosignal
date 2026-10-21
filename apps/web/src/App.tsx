@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError, notifyUnauthorized, onUnauthorized, type Chat, type RealtimeEvent, type User } from './api.js';
 import { onOutboxSent, startOutbox } from './outbox.js';
+import { clearMediaCache } from './mediaCache.js';
 import { baselineSeq, cacheChats, cacheEventMessage, catchUp, clearCache, noteLiveSeq, prepareCache, readCachedChats, type SyncSignal } from './sync.js';
 import { ChatIcon } from './icons.js';
 import { Conversation } from './Conversation.js';
@@ -252,7 +253,7 @@ export default function App() {
     try { localStorage.setItem('tel-theme', theme); } catch { /* ignore */ }
   }, [theme]);
 
-  useEffect(() => onUnauthorized(() => setAuth({ status: 'guest' })), []);
+  useEffect(() => onUnauthorized(() => { void clearMediaCache(); setAuth({ status: 'guest' }); }), []);
   useEffect(() => { void api.me().then((user) => setAuth({ status: 'ready', user })).catch(() => setAuth({ status: 'guest' })); }, []);
 
   const joinToken = inviteTokenFromPath(window.location.pathname);

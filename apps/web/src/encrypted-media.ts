@@ -1,3 +1,4 @@
+import { getCachedMedia, putCachedMedia } from './mediaCache.js';
 import { api, type Message, type OutboundEncryptedPayload } from './api.js';
 import { chatEncryptionKey, decryptMessage, encryptContent } from './e2ee.js';
 
@@ -73,7 +74,14 @@ export const hydrateEncryptedMedia = async (chatId: string, kind: string, payloa
   let pending = objectUrlCache.get(cacheKey);
   if (!pending) {
     pending = (async () => {
-      const [key, ciphertext] = await Promise.all([chatEncryptionKey(chatId, keyVersion), api.encryptedMedia(envelope.id)]);
+      const fetchCipher = async (): Promise<ArrayBuffer> => {
+        const hit = await getCachedMedia(envelope.id);
+        if (hit) return hit;
+        const fresh = await api.encryptedMedia(envelope.id);
+        void putCachedMedia(envelope.id, [new Uint8Array(fresh)]);
+        return fresh;
+      };
+      const [key, ciphertext] = await Promise.all([chatEncryptionKey(chatId, keyVersion), fetchCipher()]);
       const plaintext = await crypto.subtle.decrypt(
         { name: 'AES-GCM', iv: buffer(b64ToBytes(envelope.nonce)), additionalData: mediaAad(chatId) }, key, ciphertext
       );

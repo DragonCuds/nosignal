@@ -1,4 +1,4 @@
-// Local IndexedDB (Dexie) shared by the weak-net features.
+// Local IndexedDB (Dexie) shared by the weak-net features. Schema is a contract: see tasks/TASKS-WEAKNET.md.
 import { Dexie, type Table } from 'dexie';
 
 export type OutboxRow = {
@@ -22,6 +22,8 @@ export type OutboxRow = {
 export type ChatRow = { id: string; data: unknown; updatedAt: number };
 export type MessageRow = { chatId: string; id: string; n: number; data: unknown };
 export type ChunkRow = { id: string; n: number; data: ArrayBuffer; updatedAt: number };
+export type MediaMetaRow = { id: string; size: number; lastUsed: number };
+export type MediaDataRow = { id: string; data: ArrayBuffer };
 export type MetaRow = { key: string; value: unknown };
 
 class TelDb extends Dexie {
@@ -31,6 +33,9 @@ class TelDb extends Dexie {
   /** Finished ciphertext chunks of an attachment download (resume). id = attachment id. */
   chunks!: Table<ChunkRow, [string, number]>;
   meta!: Table<MetaRow, string>;
+  /** Persistent media cache: ciphertext exactly as the server sent it (never plaintext). Wiped on logout / account change. */
+  mediaMeta!: Table<MediaMetaRow, string>;
+  mediaData!: Table<MediaDataRow, string>;
   constructor() {
     super('tel-messenger');
     this.version(1).stores({
@@ -40,6 +45,7 @@ class TelDb extends Dexie {
       chunks: '[id+n], id, updatedAt',
       meta: 'key',
     });
+    this.version(2).stores({ mediaMeta: 'id, lastUsed', mediaData: 'id' });
   }
 }
 

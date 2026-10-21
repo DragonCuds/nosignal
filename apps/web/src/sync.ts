@@ -79,7 +79,7 @@ export const prepareCache = async (userId: string): Promise<void> => {
   const row = await safe(() => db.meta.get(META_USER), undefined);
   if (row?.value === userId) return;
   await safe(async () => {
-    await Promise.all([db.chats.clear(), db.messages.clear(), db.outbox.clear(), db.chunks.clear(), db.meta.clear()]);
+    await Promise.all([db.chats.clear(), db.messages.clear(), db.outbox.clear(), db.chunks.clear(), db.meta.clear(), db.mediaMeta.clear(), db.mediaData.clear()]);
     await db.meta.put({ key: META_USER, value: userId });
   }, undefined);
   seqValue = undefined;
@@ -88,7 +88,7 @@ export const prepareCache = async (userId: string): Promise<void> => {
 
 /** Explicit logout: forget cached conversations (the unsent outbox stays; prepareCache drops it on an account change). */
 export const clearCache = async (): Promise<void> => {
-  await safe(() => Promise.all([db.chats.clear(), db.messages.clear()]).then(() => undefined), undefined);
+  await safe(() => Promise.all([db.chats.clear(), db.messages.clear(), db.mediaMeta.clear(), db.mediaData.clear()]).then(() => undefined), undefined);
 };
 
 export const clearMessageCache = (): Promise<void> => safe(() => db.messages.clear(), undefined);
