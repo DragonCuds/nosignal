@@ -200,6 +200,9 @@ export const startOutbox = (): (() => void) => {
     clearTimeout(timer);
     timer = undefined;
     started = undefined;
+    // The queue belongs to one signed-in user: never carry rows or in-flight markers over to the next account in this tab.
+    mem.clear();
+    inflight.clear();
   };
   return started;
 };

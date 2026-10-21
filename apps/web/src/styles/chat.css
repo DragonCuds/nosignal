@@ -345,3 +345,18 @@
   .att-photo::before, .typing-dots i, .voice-bar__dot { animation: none !important; }
   .msg-row--enter, .msg-row--enter .msg__track, .msg-row--leave, .msg-row--leave .msg__track { animation-duration: 1ms !important; }
 }
+
+/* Key-change notice (safety-number style): no borders, surface tints only */
+.keychange { background: var(--surface); border-radius: 14px; box-shadow: var(--shadow-pop); direction: rtl; display: flex; flex-direction: column; margin: 8px 12px; max-height: 72%; padding: 14px; flex: 0 1 auto; min-height: 0; }
+.keychange__body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.keychange__title { align-items: center; color: var(--danger, #e5484d); display: flex; font-weight: 600; gap: 8px; }
+.keychange__title svg { flex: none; height: 18px; width: 18px; }
+.keychange p { color: var(--text-2); font-size: 13px; line-height: 1.8; margin: 8px 0; }
+.keychange__fp { margin-top: 8px; }
+.keychange__fp > span { color: var(--text-2); font-size: 12px; }
+.keychange__fp code { background: var(--surface-2); border-radius: 10px; display: block; font-family: ui-monospace, monospace; font-size: 12px; letter-spacing: .04em; line-height: 1.8; margin-top: 4px; overflow-wrap: anywhere; padding: 8px; text-align: center; user-select: all; word-spacing: .3em; }
+.keychange__fp--new code { background: color-mix(in srgb, var(--danger, #e5484d) 14%, var(--surface-2)); }
+.keychange__error { color: var(--danger, #e5484d) !important; }
+.keychange__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.keychange__actions .button { flex: 1 1 140px; }
+.keychange__actions .button:not(.button--primary) { background: var(--surface-2); color: var(--text); }

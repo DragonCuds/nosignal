@@ -71,27 +71,72 @@ const dbDelete = async (userId: string): Promise<void> => {
   });
   db.close();
 };
-const pinMember = async (memberId: string, value: string): Promise<void> => {
+/** The contact's key differs from the one we pinned (trust on first use). Thrown instead of ever re-pinning silently. */
+export class KeyChangedError extends Error {
+  constructor(readonly memberId: string, readonly oldFingerprint: string, readonly newFingerprint: string) {
+    super('Encryption identity changed; verify the contact before continuing');
+    this.name = 'KeyChangedError';
+  }
+}
+const readPin = async (memberId: string): Promise<string | undefined> => {
   if (!identity) throw new Error('Encryption identity is not initialized');
   const db = await openDb();
-  const pinId = `${identity.userId}:${memberId}`;
-  const existing = await new Promise<string | undefined>((resolve, reject) => {
-    const request = db.transaction('pins').objectStore('pins').get(pinId);
-    request.onsuccess = () => resolve(request.result as string | undefined);
-    request.onerror = () => reject(request.error);
-  });
-  if (existing && existing !== value) { db.close(); throw new Error('Encryption identity changed; verify the contact before continuing'); }
-  if (!existing) await new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction('pins', 'readwrite');
-    transaction.objectStore('pins').put(value, pinId);
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-  });
-  db.close();
+  try {
+    return await new Promise<string | undefined>((resolve, reject) => {
+      const request = db.transaction('pins').objectStore('pins').get(`${identity!.userId}:${memberId}`);
+      request.onsuccess = () => resolve(request.result as string | undefined);
+      request.onerror = () => reject(request.error);
+    });
+  } finally { db.close(); }
+};
+const writePin = async (memberId: string, value: string): Promise<void> => {
+  if (!identity) throw new Error('Encryption identity is not initialized');
+  const db = await openDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction('pins', 'readwrite');
+      transaction.objectStore('pins').put(value, `${identity!.userId}:${memberId}`);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+  } finally { db.close(); }
+};
+const pinMember = async (memberId: string, value: string): Promise<void> => {
+  const existing = await readPin(memberId);
+  if (existing && existing !== value) throw new KeyChangedError(memberId, existing, value);
+  if (!existing) await writePin(memberId, value);
 };
 const fingerprint = async (jwk: JsonWebKey): Promise<string> => {
   const digest = await crypto.subtle.digest('SHA-256', encoder.encode(`P-256:${jwk.x}:${jwk.y}`));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+};
+
+export type KeyChange = { memberId: string; oldFingerprint: string; newFingerprint: string };
+
+/** Contacts of this chat whose server-side key no longer matches the pinned one. Never changes any pin. */
+export const checkKeyChanges = async (chatId: string): Promise<KeyChange[]> => {
+  if (!identity || channelOfChat.has(chatId)) return [];
+  let keys: Array<{ memberId: string; publicKey: JsonWebKey | null }>;
+  const groupId = groupOfChat.get(chatId);
+  if (groupId) keys = (await groupsApi.get(groupId)).members.map((member) => ({ memberId: member.id, publicKey: member.publicKey }));
+  else keys = (await api.chatCrypto(chatId)).members.map((member) => ({ memberId: member.userId, publicKey: member.publicKey }));
+  const changes: KeyChange[] = [];
+  for (const { memberId, publicKey } of keys) {
+    if (memberId === identity.userId || !publicKey) continue;
+    const pinned = await readPin(memberId);
+    const actual = await fingerprint(publicKey);
+    if (pinned && pinned !== actual) changes.push({ memberId, oldFingerprint: pinned, newFingerprint: actual });
+  }
+  return changes;
+};
+
+/** The user explicitly accepted the contact's new key: re-pin it and drop everything derived from the old one. */
+export const acceptKeyChange = async (chatId: string, change: KeyChange): Promise<void> => {
+  const current = (await checkKeyChanges(chatId)).find((item) => item.memberId === change.memberId);
+  if (!current || current.newFingerprint !== change.newFingerprint) throw new Error('The key changed again; review it first');
+  await writePin(change.memberId, current.newFingerprint);
+  keyCache.clear();
+  groupCtxs.clear();
 };
 
 export const hasLocalIdentity = async (userId: string): Promise<boolean> => Boolean(await dbGet(userId));

@@ -136,6 +136,9 @@ export const onUnauthorized = (handler: () => void): (() => void) => {
   };
 };
 
+/** Realtime saw its session revoked (close code 4401): same effect as a 401 on any request. */
+export const notifyUnauthorized = (): void => unauthorizedHandler?.();
+
 const TIMEOUT_MESSAGE = 'ارتباط با سرور برقرار نشد. اینترنت را بررسی کنید.';
 const JSON_TIMEOUT_MS = 15_000;
 /** Big multipart bodies (sticker pack, GIF, encrypted media) need longer than a JSON call. */

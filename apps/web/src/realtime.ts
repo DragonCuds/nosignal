@@ -29,7 +29,10 @@ export type RealtimeHandlers = {
   onReconnect: () => void;
   onState: (state: RealtimeState) => void;
   onTransport: (transport: RealtimeTransport) => void;
+  /** The server closed the connection because the session was revoked (WS close 4401, or SSE ended with /api/me 401). */
+  onRevoked?: () => void;
 };
+const REVOKED_CLOSE_CODE = 4401;
 
 /** Framework-free client; `useRealtime` below is a thin React wrapper (also lets node tests drive it). */
 export class RealtimeClient {
@@ -216,7 +219,10 @@ export class RealtimeClient {
       }
       this.handlers.onEvent(event);
     };
-    socket.onclose = () => this.wsDown(socket, !main, opened);
+    socket.onclose = (closeEvent) => {
+      if (closeEvent?.code === REVOKED_CLOSE_CODE && (main || this.ws === socket)) { this.revoked(); return; }
+      this.wsDown(socket, !main, opened);
+    };
     socket.onerror = () => { try { socket.close(); } catch { /* ignore */ } };
   }
 
@@ -241,6 +247,21 @@ export class RealtimeClient {
       }
     }
     this.scheduleRetry();
+  }
+
+  /** Session is gone: stop for good (no reconnect storm) and let the app show the login screen. */
+  private revoked() {
+    if (this.stopped) return;
+    this.stop();
+    this.setState('offline');
+    this.handlers.onRevoked?.();
+  }
+
+  /** SSE ended without a status code: ask the API whether the session is still valid before retrying. */
+  private checkSessionThenRetry() {
+    void fetch('/api/me', { credentials: 'include' }).then((response) => {
+      if (response.status === 401) this.revoked(); else this.scheduleRetry();
+    }).catch(() => this.scheduleRetry());
   }
 
   private schedulePing() {
@@ -296,7 +317,7 @@ export class RealtimeClient {
       this.setState('offline');
       if (source.readyState === 2) { // CLOSED: browser gave up (e.g. 401), retry ourselves
         this.closeSse();
-        this.scheduleRetry();
+        this.checkSessionThenRetry();
       } // CONNECTING: the browser retries on its own and onopen will fire again
     };
     this.connectTimer = setTimeout(() => {
@@ -350,12 +371,14 @@ export class RealtimeClient {
   };
 }
 
-export function useRealtime(onEvent: (event: RealtimeEvent) => void, onReconnect: () => void) {
+export function useRealtime(onEvent: (event: RealtimeEvent) => void, onReconnect: () => void, onRevoked?: () => void) {
   const eventHandler = useRef(onEvent);
   const reconnectHandler = useRef(onReconnect);
   const [state, setState] = useState<RealtimeState>('connecting');
   const [transport, setTransport] = useState<RealtimeTransport>(readTransport);
   const clientRef = useRef<RealtimeClient | undefined>(undefined);
+  const revokedHandler = useRef(onRevoked);
+  revokedHandler.current = onRevoked;
   eventHandler.current = onEvent;
   reconnectHandler.current = onReconnect;
 
@@ -365,6 +388,7 @@ export function useRealtime(onEvent: (event: RealtimeEvent) => void, onReconnect
       onReconnect: () => reconnectHandler.current(),
       onState: setState,
       onTransport: setTransport,
+      onRevoked: () => revokedHandler.current?.(),
     });
     clientRef.current = client;
     client.start();

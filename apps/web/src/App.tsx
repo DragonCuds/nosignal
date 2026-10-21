@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, ApiError, onUnauthorized, type Chat, type RealtimeEvent, type User } from './api.js';
+import { api, ApiError, notifyUnauthorized, onUnauthorized, type Chat, type RealtimeEvent, type User } from './api.js';
 import { onOutboxSent, startOutbox } from './outbox.js';
 import { baselineSeq, cacheChats, cacheEventMessage, catchUp, clearCache, noteLiveSeq, prepareCache, readCachedChats, type SyncSignal } from './sync.js';
 import { ChatIcon } from './icons.js';
@@ -44,6 +44,8 @@ type MessengerProps = { initialChatId?: string; user: User; theme: Theme; onTogg
 
 function Messenger({ initialChatId, user, theme, onToggleTheme, onLogout }: MessengerProps) {
   const [chats, setChats] = useState<Chat[]>([]);
+  const chatsRef = useRef<Chat[]>([]);
+  chatsRef.current = chats;
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [selectedId, setSelectedId] = useState<string | undefined>(initialChatId);
   const [newChannelOpen, setNewChannelOpen] = useState(false);
@@ -140,7 +142,10 @@ function Messenger({ initialChatId, user, theme, onToggleTheme, onLogout }: Mess
     if (!cryptoReady.current) return; // the list is rebuilt as soon as the key is ready
     if (event.type === 'presence') {
       setPresence((current) => ({ ...current, [event.userId]: { online: event.online, lastSeen: event.lastSeen } }));
+    } else if ((event.type as string) === 'chat.new') {
+      void loadChats(false); // added to a new direct chat / group: show it without a reload
     } else if (event.type === 'message.new') {
+      if (!chatsRef.current.some((chat) => chat.id === event.chatId)) { void loadChats(false); return; } // first message of a chat we do not list yet
       void decryptMessage(event.message).then((message) => setChats((current) => current
         .map((chat) => chat.id === event.chatId ? {
           ...chat,
@@ -163,7 +168,7 @@ function Messenger({ initialChatId, user, theme, onToggleTheme, onLogout }: Mess
       for (const event of result.events) void cacheEventMessage(event.message);
       setSync((current) => ({ token: current.token + 1, reset: result.reset, events: result.events }));
     }).catch(() => setSync((current) => ({ token: current.token + 1, reset: true, events: [] })));
-  });
+  }, () => notifyUnauthorized());
 
   // A sent message moves the chat list preview; the open conversation does this itself.
   useEffect(() => onOutboxSent((row) => { if (row.chatId !== selectedId) void loadChats(false); }), [selectedId, loadChats]);

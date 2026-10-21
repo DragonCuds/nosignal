@@ -43,6 +43,22 @@ function loadTgs(url: string): Promise<LottieData> {
   }
   return pending;
 }
+/** First of a few sample frames that actually paints pixels (a blank frame 0 would look like a missing sticker). */
+function findPosterFrame(player: LottiePlayer, container: HTMLElement): number {
+  const canvas = container.querySelector('canvas');
+  const context = canvas?.getContext('2d');
+  const total = Math.max(1, Math.floor(player.totalFrames || 1));
+  if (!canvas || !context || !canvas.width || !canvas.height) return 0;
+  for (const share of [0, 0.1, 0.25, 0.5, 0.75]) {
+    const frame = Math.min(total - 1, Math.floor(total * share));
+    try {
+      player.goToAndStop(frame, true);
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      for (let index = 3; index < pixels.length; index += 16) if (pixels[index] > 0) return frame;
+    } catch { return 0; }
+  }
+  return 0;
+}
 function reducedMotion(): boolean { return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches; }
 function canPlay(sticker: TgStickerElement): boolean { return sticker.canPlay && !document.hidden && !reducedMotion(); }
 function reschedule(): void {
@@ -93,6 +109,8 @@ export class TgStickerElement extends HTMLElement {
   private visible = false;
   private loadId = 0;
   private loaded = false;
+  /** Frame shown while not playing: frame 0 is empty in many stickers, so pick the first frame that paints something. */
+  private posterFrame = 0;
 
   constructor() {
     super();
@@ -150,7 +168,8 @@ export class TgStickerElement extends HTMLElement {
       if (this.format === 'tgs') {
         const data = await loadTgs(url); if (!this.isConnected || id !== this.loadId) return;
         this.lottiePlayer = lottie.loadAnimation({ container: this.media, renderer: 'canvas', loop: this.hasAttribute('loop'), autoplay: false, animationData: cloneLottieData(data), rendererSettings: { clearCanvas: true, progressiveLoad: true, preserveAspectRatio: 'xMidYMid meet' } });
-        this.lottiePlayer.goToAndStop(0, true);
+        this.posterFrame = findPosterFrame(this.lottiePlayer, this.media);
+        this.lottiePlayer.goToAndStop(this.posterFrame, true);
       } else if (this.format === 'webm') {
         const video = document.createElement('video');
         video.src = url; video.muted = true; video.defaultMuted = true; video.playsInline = true; video.loop = this.hasAttribute('loop'); video.preload = 'metadata';
@@ -180,7 +199,7 @@ export class TgStickerElement extends HTMLElement {
   }
   /** @internal Used by the shared scheduler and reduced-motion policy. */
   pausePlayback(): void {
-    this.lottiePlayer?.pause(); this.lottiePlayer?.goToAndStop(0, true);
+    this.lottiePlayer?.pause(); this.lottiePlayer?.goToAndStop(this.posterFrame, true);
     if (this.video) { this.video.pause(); if (reducedMotion() && this.video.readyState >= HTMLMediaElement.HAVE_METADATA) this.video.currentTime = 0; }
   }
 }

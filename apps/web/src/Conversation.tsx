@@ -1,12 +1,14 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api, type Chat, type Gif, type GifMessagePayload, type Message, type OutboundEncryptedPayload, type RealtimeEvent, type Sticker, type StickerMessagePayload, type User } from './api.js';
 import { DownIcon } from './icons.js';
-import { decryptMessage as decryptPlain, encryptContent } from './e2ee.js';
+import { acceptKeyChange, checkKeyChanges, decryptMessage as decryptPlain, encryptContent } from './e2ee.js';
 import { discard as discardOutbox, enqueue, listOutbox, newClientMsgId, onOutboxChange, onOutboxSent, retryNow, type OutboxRow } from './outbox.js';
 import { cacheEventMessage, cacheMessages, forgetPlain, plainOf, readCachedMessages, rememberPlain, type SyncSignal } from './sync.js';
 import { decryptMessageMedia as decryptMessage, decryptMessagesMedia as decryptMessages, encryptMediaMessage } from './encrypted-media.js';
 import { dayKey, faNumber } from './ui.js';
 import { ChatHeader, type SearchState } from './chat/ChatHeader.js';
+import { KeyChangeBanner, type NamedKeyChange } from './chat/KeyChangeBanner.js';
+import { groupsApi } from './groups/groupsApi.js';
 import { Composer } from './chat/Composer.js';
 import { ChannelInfo } from './channels/ChannelInfo.js';
 import { GroupInfo } from './groups/GroupInfo.js';
@@ -105,6 +107,8 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
   const [error, setError] = useState('');
   const [fingerprint, setFingerprint] = useState<string>();
+  const [keyChanges, setKeyChanges] = useState<NamedKeyChange[]>([]);
+  const [keyDismissed, setKeyDismissed] = useState(false);
   const [unreadFromId, setUnreadFromId] = useState<string>();
   const [search, setSearch] = useState<{ query: string; index: number } | null>(null);
   const [outboxRows, setOutboxRows] = useState<OutboxRow[]>(() => listOutbox(chat.id));
@@ -277,6 +281,27 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
       .then((state) => setFingerprint(state.members.find((member) => member.userId === chat.peer?.id)?.fingerprint ?? undefined))
       .catch(() => undefined);
   }, [chat.id, chat.peer?.id]);
+
+  // A contact whose key differs from the pinned one: show the notice, block sending, never re-pin on our own.
+  const refreshKeyChanges = useLatest(async () => {
+    try {
+      const found = await checkKeyChanges(chat.id);
+      if (!found.length) { setKeyChanges([]); return; }
+      let names = new Map<string, string>();
+      if (isGroup && chat.groupId) names = new Map((await groupsApi.get(chat.groupId)).members.map((member) => [member.id, member.displayName]));
+      setKeyChanges(found.map((item) => ({ ...item, name: names.get(item.memberId) ?? chat.peer?.displayName ?? 'مخاطب' })));
+    } catch { /* offline or not ready: try again later */ }
+  });
+  useEffect(() => { setKeyChanges([]); setKeyDismissed(false); void refreshKeyChanges(); }, [chat.id]);
+  const undecryptable = messages.filter((item) => item.text?.startsWith('🔒 ')).length;
+  useEffect(() => { if (undecryptable) void refreshKeyChanges(); }, [undecryptable]);
+  const acceptKey = async (change: NamedKeyChange) => {
+    await acceptKeyChange(chat.id, change);
+    setKeyChanges([]);
+    setKeyDismissed(false);
+    await load();
+    void refreshKeyChanges();
+  };
 
   /** Apply one server message event to the open list (live or replayed by /api/sync; both are idempotent). */
   const applyEvent = useLatest(async (type: 'message.new' | 'message.edited' | 'message.deleted', raw: Message) => {
@@ -619,6 +644,7 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
         onCopyFingerprint={(value) => void navigator.clipboard.writeText(value).then(() => showError('اثر انگشت کپی شد؛ آن را خارج از NoSignal با مخاطب مقایسه کنید.')).catch(() => showError(value))}
         onBack={onBack}
       />
+      {keyChanges.length > 0 && !keyDismissed && <KeyChangeBanner changes={keyChanges} onAccept={acceptKey} onDismiss={() => setKeyDismissed(true)} />}
       <div className="conversation__body">
         <div className="viewport" ref={viewport} onScroll={onScroll}>
           <div className="column" aria-live="polite">
@@ -651,7 +677,9 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
           <DownIcon />{unreadBelow > 0 && <span>{faNumber(unreadBelow)}</span>}
         </button>
       </div>
-      {canPost
+      {keyChanges.length > 0
+        ? <div className="channel-readonly" role="note">تا تأیید کلید جدید، ارسال پیام ممکن نیست.{keyDismissed && <> <button className="text-button" type="button" onClick={() => setKeyDismissed(false)}>بررسی کلید</button></>}</div>
+        : canPost
         ? <Composer mode={mode} cancel={() => setMode(null)} submit={submit} sendAttachment={attach} sendSticker={sendSticker} sendGif={sendGif} uploadGif={uploadGif} typing={typing} />
         : <div className="channel-readonly" role="note">فقط مدیران کانال می‌توانند پست بگذارند.</div>}
       {isGroup && chat.groupId && <GroupInfo open={infoOpen} groupId={chat.groupId} chatId={chat.id} onClose={() => setInfoOpen(false)} onChanged={() => onChatChanged(chat.id)} onGone={() => { onBack(); onChatChanged(chat.id); }} />}

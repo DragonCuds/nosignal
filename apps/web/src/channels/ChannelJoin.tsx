@@ -1,3 +1,4 @@
+import { ApiError } from '../api.js';
 import { useEffect, useState } from 'react';
 import { ChatIcon } from '../icons.js';
 import { MegaphoneIcon } from './ChannelIcon.js';
@@ -23,7 +24,7 @@ export function ChannelJoin({ token, onDone }: Props) {
   const join = async () => {
     setBusy(true); setError('');
     try { onDone((await channelsApi.join(token)).chatId); }
-    catch { setError('عضویت انجام نشد. دوباره تلاش کنید.'); setBusy(false); }
+    catch (caught) { setError(caught instanceof ApiError && caught.status === 403 ? 'شما از این کانال حذف شده‌اید' : 'عضویت انجام نشد. دوباره تلاش کنید.'); setBusy(false); }
   };
 
   return (

@@ -56,3 +56,27 @@ test('realtime client: heartbeat, reconnect, SSE fallback and probe', async () =
   c.stop(); assert.equal(probe.readyState, 3);
   } finally { mock.timers.reset(); }
 });
+
+test('realtime client: close code 4401 (revoked session) stops for good, a normal drop reconnects', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  try {
+    const mk = () => ({ addEventListener() {}, removeEventListener() {} });
+    globalThis.window = mk(); globalThis.document = Object.assign(mk(), { visibilityState: 'visible' });
+    globalThis.location = { protocol: 'https:', host: 'x.test' };
+    globalThis.sessionStorage = { getItem: () => null, setItem() {} };
+    const sockets = [];
+    globalThis.WebSocket = class { constructor() { this.readyState = 0; sockets.push(this); } send() {} close() { this.readyState = 3; }
+      open() { this.readyState = 1; this.onopen?.(); } drop(code) { this.readyState = 3; this.onclose?.({ code }); } };
+    globalThis.EventSource = class { constructor() { this.readyState = 0; } close() {} };
+    const { RealtimeClient } = await import('../../apps/web/src/realtime.ts');
+    let revoked = 0;
+    const c = new RealtimeClient({ onEvent() {}, onReconnect() {}, onState() {}, onTransport() {}, onRevoked: () => { revoked += 1; } });
+    c.start(); let ws = sockets.at(-1); ws.open();
+    ws.drop(1006); // network drop: reconnects
+    mock.timers.tick(30000); assert.equal(sockets.length, 2); assert.equal(revoked, 0);
+    ws = sockets.at(-1); ws.open();
+    ws.drop(4401); // server revoked the session
+    assert.equal(revoked, 1);
+    mock.timers.tick(120000); assert.equal(sockets.length, 2, 'no reconnect after 4401');
+  } finally { mock.timers.reset(); }
+});

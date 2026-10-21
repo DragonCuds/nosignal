@@ -26,7 +26,7 @@ type Props = {
   onBack: () => void;
 };
 
-const groupFingerprint = (value: string) => value.replace(/\s+/g, '').match(/.{1,4}/g)?.join(' ') ?? value;
+export const groupFingerprint = (value: string) => value.replace(/\s+/g, '').match(/.{1,4}/g)?.join(' ') ?? value;
 
 export function ChatHeader({ peer, saved, channel, presence, typing, fingerprint, search, onSearchOpen, onSearchClose, onSearchQuery, onSearchStep, onCopyFingerprint, onBack }: Props) {
   const [infoOpen, setInfoOpen] = useState(false);
