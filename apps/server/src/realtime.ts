@@ -53,22 +53,48 @@ const parseClientEvent = (data: WebSocket.RawData): RealtimeClientEvent | { type
 const isChatMember = async (chatId: string, userId: string): Promise<boolean> =>
   (await db.query('SELECT 1 FROM chat_members WHERE chat_id = $1 AND user_id = $2', [chatId, userId])).rowCount === 1;
 
+// Creating a direct chat or adding someone to a group is unilateral. A recipient may see
+// the sender's presence only after the sender has actually messaged that recipient in a
+// current, two-person direct chat. Group/channel membership grants no presence access.
+const presenceAudience = async (userId: string): Promise<Set<string>> => {
+  const result = await db.query<{ user_id: string }>(
+    `SELECT DISTINCT recipient.user_id
+     FROM chat_members sender
+     JOIN chat_members recipient ON recipient.chat_id = sender.chat_id AND recipient.user_id <> sender.user_id
+     JOIN chats c ON c.id = sender.chat_id AND c.type = 'direct'
+     WHERE sender.user_id = $1
+       AND (SELECT count(*) FROM chat_members WHERE chat_id = c.id) = 2
+       AND NOT EXISTS (SELECT 1 FROM saved_chats WHERE chat_id = c.id)
+       AND NOT EXISTS (SELECT 1 FROM groups WHERE chat_id = c.id)
+       AND NOT EXISTS (SELECT 1 FROM channels WHERE chat_id = c.id)
+       AND EXISTS (
+         SELECT 1 FROM messages m
+         WHERE m.chat_id = c.id AND m.sender_id = sender.user_id AND m.deleted_at IS NULL
+       )`,
+    [userId]
+  );
+  return new Set(result.rows.map((row) => row.user_id));
+};
+
 export const registerRealtime = async (app: FastifyInstance): Promise<void> => {
   const sockets = new Set<SocketState>();
   const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 });
   const onlineElsewhere = (userId: string): boolean => [...sockets].some((state) => state.userId === userId);
-  const broadcastPresence = (userId: string, online: boolean, lastSeen: string | null): void => {
+  const broadcastPresence = async (userId: string, online: boolean, lastSeen: string | null): Promise<void> => {
+    const audience = await presenceAudience(userId);
+    // An earlier query may finish after a newer connect/disconnect transition.
+    if (onlineElsewhere(userId) !== online) return;
     const event: RealtimeServerEvent = { type: 'presence', userId, online, lastSeen };
-    for (const state of sockets) if (state.userId !== userId) state.send(event);
+    for (const state of sockets) if (audience.has(state.userId)) state.send(event);
   };
   const connect = (state: SocketState): void => {
     const becameOnline = !onlineElsewhere(state.userId);
     sockets.add(state);
-    if (becameOnline) broadcastPresence(state.userId, true, null);
+    if (becameOnline) void broadcastPresence(state.userId, true, null).catch((error: unknown) => app.log.error(error, 'Failed to deliver presence'));
   };
   const disconnect = (state: SocketState): void => {
     if (!sockets.delete(state)) return;
-    if (!onlineElsewhere(state.userId)) broadcastPresence(state.userId, false, new Date().toISOString());
+    if (!onlineElsewhere(state.userId)) void broadcastPresence(state.userId, false, new Date().toISOString()).catch((error: unknown) => app.log.error(error, 'Failed to deliver presence'));
   };
   // Shared by WS typing frames and POST /api/typing. Returns false when the client is over its limit.
   const allowEvent = (state: Pick<SocketState, 'events'>): boolean => {
