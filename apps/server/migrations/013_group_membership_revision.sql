@@ -1,0 +1,1 @@
+ALTER TABLE groups ADD COLUMN membership_revision INTEGER NOT NULL DEFAULT 0;

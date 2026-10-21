@@ -30,7 +30,9 @@ export function CreateGroupDialog({ open, onClose, onCreated }: Props) {
     try {
       const created = await groupsApi.create(name, members.map((member) => member.id));
       registerGroupChat(created.chatId, created.id);
-      await ensureGroupKeyed(created.chatId, created.id); // makes the first key and wraps it for every member
+      // The group already exists after create succeeds. Open it even if a recipient's key changed;
+      // the conversation shows the key-change notice and keeps the group pending.
+      await ensureGroupKeyed(created.chatId, created.id).catch(() => undefined);
       await onCreated(created.chatId);
       onClose();
     } catch { setError('ساخت گروه انجام نشد. دوباره تلاش کنید.'); } finally { setBusy(false); }
@@ -55,6 +57,7 @@ export function CreateGroupDialog({ open, onClose, onCreated }: Props) {
           ))}
         </div>
         <PeoplePicker exclude={members.map((member) => member.id)} onPick={(user) => setMembers((current) => [...current, user])} disabled={busy || members.length >= 99} placeholder="افزودن عضو با آیدی" />
+        <p className="group__lead">کلید اعضای جدید در اولین ارتباط ثبت می‌شود. برای اطمینان از هویت، اثر انگشت کلید را بعداً از راهی مستقل با هر عضو مقایسه کنید.</p>
         <div className={`login__error${error ? ' login__error--visible' : ''}`} role="alert">{error || ' '}</div>
         <button className="button button--primary" type="submit" disabled={busy}>{busy ? <span className="spinner" /> : 'ساخت گروه'}</button>
       </form>

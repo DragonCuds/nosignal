@@ -31,13 +31,21 @@ const { registerCryptoRoutes } = await load('crypto.js');
 let app;
 const ids = {};
 const cookies = {};
+const fingerprints = new Map();
 const cookieOf = (r) => r.headers['set-cookie'].split(';')[0];
-const send = (user, method, url, payload) => app.inject({ method, url, payload, remoteAddress: '10.0.0.1', headers: { origin, cookie: cookies[user] } });
+const send = async (user, method, url, payload) => {
+  if (method === 'PUT' && /\/api\/groups\/\d+\/keys$/.test(url) && payload?.membershipRevision === undefined) {
+    const groupId = url.split('/')[3];
+    const row = (await db.query('SELECT membership_revision FROM groups WHERE id = $1', [groupId])).rows[0];
+    payload = { ...payload, membershipRevision: row ? Number(row.membership_revision) : 0 };
+  }
+  return app.inject({ method, url, payload, remoteAddress: '10.0.0.1', headers: { origin, cookie: cookies[user] } });
+};
 const b64 = (n) => randomBytes(n).toString('base64url');
 const enc = () => ({ version: 2, cipherId: randomUUID(), nonce: b64(12), ciphertext: b64(40) });
 const post = (user, chatId, keyVersion) => send(user, 'POST', `/api/chats/${chatId}/messages`, { kind: 'text', encrypted: enc(), keyVersion });
 const wrap = () => b64(60);
-const envs = (...names) => names.map((n) => ({ userId: ids[n], wrapped: wrap() }));
+const envs = (...names) => names.map((n) => ({ userId: ids[n], fingerprint: fingerprints.get(ids[n]), wrapped: wrap() }));
 
 before(async () => {
   await runMigrations();
@@ -55,7 +63,9 @@ before(async () => {
   for (const name of Object.keys(ids)) cookies[name] = cookieOf(await app.inject({ method: 'GET', url: `/test/login/${ids[name]}`, headers: { origin } }));
   for (const name of Object.keys(ids)) {
     if (name === 'noid') continue;
-    assert.equal((await send(name, 'PUT', '/api/crypto/identity', { publicKey: { kty: 'EC', crv: 'P-256', x: b64(32), y: b64(32) } })).statusCode, 200);
+    const response = await send(name, 'PUT', '/api/crypto/identity', { publicKey: { kty: 'EC', crv: 'P-256', x: b64(32), y: b64(32) } });
+    assert.equal(response.statusCode, 200);
+    fingerprints.set(ids[name], response.json().fingerprint);
   }
 });
 
@@ -82,25 +92,26 @@ test('create group: validation, owner, list, keys', async () => {
   assert.equal((await send('owner', 'POST', '/api/groups', { title: 'G', memberIds: ['x'] })).statusCode, 400);
   assert.equal((await send('owner', 'POST', '/api/groups', { title: 'G', memberIds: [ids.noid] })).statusCode, 409); // no identity
   assert.equal((await send('owner', 'POST', '/api/groups', { title: 'G', memberIds: ['99999'] })).statusCode, 409);
-  const created = await send('owner', 'POST', '/api/groups', { title: 'Friends', memberIds: [ids.bob, ids.adm, ids.bob] });
+  const created = await send('owner', 'POST', '/api/groups', { title: 'Friends', memberIds: [ids.bob, ids.adm, ids.carol, ids.bob] });
   assert.equal(created.statusCode, 201);
   state.id = created.json().id; state.chatId = created.json().chatId;
   // not keyed yet: posting is refused until version 1 is uploaded
   assert.equal((await post('owner', state.chatId, 1)).statusCode, 409);
   assert.equal((await send('owner', 'GET', `/api/groups/${state.id}`)).json().pendingKeyVersion, 1);
+  assert.equal((await app.inject({ method: 'PUT', url: `/api/groups/${state.id}/keys`, payload: { version: 1, envelopes: envs('owner', 'bob', 'adm', 'carol') }, headers: { origin, cookie: cookies.owner } })).statusCode, 400); // snapshot revision is required
   // PUT keys: must cover every member exactly
-  assert.equal((await send('bob', 'PUT', `/api/groups/${state.id}/keys`, { version: 1, envelopes: envs('owner', 'bob', 'adm') })).statusCode, 403);
+  assert.equal((await send('bob', 'PUT', `/api/groups/${state.id}/keys`, { version: 1, envelopes: envs('owner', 'bob', 'adm', 'carol') })).statusCode, 403);
   assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 1, envelopes: envs('owner', 'bob') })).statusCode, 400);
-  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 1, envelopes: envs('owner', 'bob', 'carol') })).statusCode, 400);
+  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 1, envelopes: envs('owner', 'bob', 'adm', 'dave') })).statusCode, 400);
   assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 1, envelopes: [...envs('owner', 'bob'), { userId: ids.owner, wrapped: wrap() }] })).statusCode, 400);
-  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 3, envelopes: envs('owner', 'bob', 'adm') })).statusCode, 409);
-  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 1, envelopes: envs('owner', 'bob', 'adm') })).statusCode, 204);
-  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 1, envelopes: envs('owner', 'bob', 'adm') })).statusCode, 409); // already uploaded
+  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 3, envelopes: envs('owner', 'bob', 'adm', 'carol') })).statusCode, 409);
+  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 1, envelopes: envs('owner', 'bob', 'adm', 'carol') })).statusCode, 204);
+  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 1, envelopes: envs('owner', 'bob', 'adm', 'carol') })).statusCode, 409); // already uploaded
   const info = (await send('bob', 'GET', `/api/groups/${state.id}`)).json();
   assert.equal(info.role, 'member');
   assert.equal(info.keyVersion, 1);
-  assert.equal(info.memberCount, 3);
-  assert.equal(info.members.length, 3);
+  assert.equal(info.memberCount, 4);
+  assert.equal(info.members.length, 4);
   assert.equal(info.members[0].role, 'owner');
   assert.ok(info.members.every((m) => m.publicKey && m.publicKey.kty === 'EC' && m.username));
   const mine = (await send('bob', 'GET', `/api/groups/${state.id}/keys?version=latest`)).json();
@@ -115,7 +126,7 @@ test('create group: validation, owner, list, keys', async () => {
   assert.equal(item.groupId, state.id);
   assert.equal(item.title, 'Friends');
   assert.equal(item.role, 'member');
-  assert.equal(item.memberCount, 3);
+  assert.equal(item.memberCount, 4);
   assert.equal(item.peer, null);
 });
 
@@ -151,7 +162,6 @@ test('messages: key version, post/edit/delete roles, key-version in payload', as
   assert.equal((await send('bob', 'PATCH', `/api/chats/${state.chatId}/messages/${state.msg}`, { encrypted: enc() })).statusCode, 400);
   assert.equal((await send('bob', 'PATCH', `/api/chats/${state.chatId}/messages/${state.msg}`, { encrypted: enc(), keyVersion: 1 })).statusCode, 200);
   // delete: sender, or admin/owner; other plain members cannot
-  assert.equal((await send('owner', 'POST', `/api/groups/${state.id}/members`, { userId: ids.carol, envelope: wrap() })).statusCode, 204);
   assert.equal((await send('carol', 'DELETE', `/api/chats/${state.chatId}/messages/${state.msg}`)).statusCode, 404);
   assert.equal((await send('owner', 'POST', `/api/groups/${state.id}/admins/${ids.adm}`)).statusCode, 204);
   const del = await send('adm', 'DELETE', `/api/chats/${state.chatId}/messages/${state.msg}`);
@@ -162,17 +172,25 @@ test('messages: key version, post/edit/delete roles, key-version in payload', as
   assert.equal((await send('carol', 'DELETE', `/api/chats/${state.chatId}/messages/${own.json().id}`)).statusCode, 200);
 });
 
-test('add member: roles, current key only, cap, duplicates, no identity', async () => {
+test('add member: rotation pending without a placeholder key, cap, duplicates, no identity', async () => {
   assert.equal((await send('bob', 'POST', `/api/groups/${state.id}/members`, { userId: ids.dave, envelope: wrap() })).statusCode, 403);
   assert.equal((await send('adm', 'POST', `/api/groups/${state.id}/members`, { userId: ids.carol, envelope: wrap() })).statusCode, 409); // already
   assert.equal((await send('adm', 'POST', `/api/groups/${state.id}/members`, { userId: ids.noid, envelope: wrap() })).statusCode, 409);
   assert.equal((await send('adm', 'POST', `/api/groups/${state.id}/members`, { userId: '99999', envelope: wrap() })).statusCode, 404);
-  assert.equal((await send('adm', 'POST', `/api/groups/${state.id}/members`, { userId: ids.dave })).statusCode, 400);
-  assert.equal((await send('adm', 'POST', `/api/groups/${state.id}/members`, { userId: ids.dave, envelope: wrap() })).statusCode, 204);
+  assert.equal((await send('adm', 'POST', `/api/groups/${state.id}/members`, { userId: ids.dave })).statusCode, 204);
   const keys = (await send('dave', 'GET', `/api/groups/${state.id}/keys`)).json();
-  assert.deepEqual(keys.map((k) => k.version), [1]);
-  assert.equal(keys[0].wrappedBy, ids.adm);
-  assert.equal((await send('dave', 'GET', `/api/groups/${state.id}`)).json().memberCount, 5);
+  assert.deepEqual(keys, []);
+  const detail = (await send('dave', 'GET', `/api/groups/${state.id}`)).json();
+  assert.equal(detail.memberCount, 5);
+  assert.equal(detail.pendingKeyVersion, 2);
+  assert.equal(detail.membershipRevision, 1);
+  assert.equal((await post('owner', state.chatId, 1)).statusCode, 409);
+  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 2, membershipRevision: 0, envelopes: envs('owner', 'adm', 'bob', 'carol', 'dave') })).statusCode, 409);
+  const original = fingerprints.get(ids.dave);
+  await db.query('UPDATE user_crypto_identities SET fingerprint = $1 WHERE user_id = $2', ['f'.repeat(64), ids.dave]);
+  assert.equal((await send('owner', 'PUT', `/api/groups/${state.id}/keys`, { version: 2, envelopes: envs('owner', 'adm', 'bob', 'carol', 'dave') })).statusCode, 409);
+  await db.query('UPDATE user_crypto_identities SET fingerprint = $1 WHERE user_id = $2', [original, ids.dave]);
+  assert.equal((await db.query('SELECT count(*) AS n FROM group_key_envelopes WHERE group_id = $1 AND version = 2', [state.id])).rows[0].n, 0);
 });
 
 test('remove / leave bump rotation; rotation rules', async () => {
@@ -268,11 +286,13 @@ test('member cap is 100', async () => {
   const extra = [];
   for (let i = 0; i < 100; i += 1) {
     const uid = await createUser(`cap${i}`, `cap${i}`, 'a-long-password-9');
-    await db.query(`INSERT INTO user_crypto_identities (user_id, public_jwk, fingerprint) VALUES ($1, json($2), $3)`, [uid, JSON.stringify({ kty: 'EC', crv: 'P-256', x: b64(32), y: b64(32) }), randomBytes(32).toString("hex")]);
+    const fp = randomBytes(32).toString('hex');
+    await db.query(`INSERT INTO user_crypto_identities (user_id, public_jwk, fingerprint) VALUES ($1, json($2), $3)`, [uid, JSON.stringify({ kty: 'EC', crv: 'P-256', x: b64(32), y: b64(32) }), fp]);
+    fingerprints.set(String(uid), fp);
     extra.push(String(uid));
   }
   assert.equal((await send('owner', 'POST', '/api/groups', { title: 'Big', memberIds: extra })).statusCode, 409); // 101 incl. creator
-  const ok = await send('owner', 'POST', '/api/groups', { title: 'Big', memberIds: extra.slice(0, 98), envelopes: [{ userId: ids.owner, wrapped: wrap() }, ...extra.slice(0, 98).map((userId) => ({ userId, wrapped: wrap() }))] });
+  const ok = await send('owner', 'POST', '/api/groups', { title: 'Big', memberIds: extra.slice(0, 98), envelopes: [{ userId: ids.owner, fingerprint: fingerprints.get(ids.owner), wrapped: wrap() }, ...extra.slice(0, 98).map((userId) => ({ userId, fingerprint: fingerprints.get(userId), wrapped: wrap() }))] });
   assert.equal(ok.statusCode, 201); // 99 members
   assert.equal((await send('owner', 'POST', `/api/groups/${ok.json().id}/members`, { userId: extra[98], envelope: wrap() })).statusCode, 204); // 100
   assert.equal((await send('owner', 'POST', `/api/groups/${ok.json().id}/members`, { userId: extra[99], envelope: wrap() })).statusCode, 409); // 101

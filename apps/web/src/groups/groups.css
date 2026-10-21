@@ -11,3 +11,4 @@
 .group-info .channel-info__rename .field input { width: 100%; }
 .group-info .channel-row { flex-wrap: wrap; }
 .group-info .channel-row__name { min-width: 120px; }
+.group-info .channel-row__name code { color: var(--text-2); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }

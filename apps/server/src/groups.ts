@@ -27,12 +27,12 @@ const parseVersion = (value: unknown): number | null =>
 
 type GroupRow = {
   id: string; chat_id: string; title: string; avatar_path: string | null; created_by: string;
-  key_version: number; pending_version: number | null; role: Role;
+  key_version: number; pending_version: number | null; membership_revision: number; role: Role;
 };
 
 const getMine = async (groupId: string, userId: string): Promise<GroupRow | null> => {
   const result = await db.query<GroupRow>(
-    `SELECT g.id, g.chat_id, g.title, g.avatar_path, g.created_by, g.key_version, g.pending_version, gm.role
+    `SELECT g.id, g.chat_id, g.title, g.avatar_path, g.created_by, g.key_version, g.pending_version, g.membership_revision, gm.role
      FROM groups g JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = $2 WHERE g.id = $1`,
     [groupId, userId]
   );
@@ -81,7 +81,7 @@ const removeMember = async (group: GroupRow, userId: string): Promise<void> => {
     await client.query('DELETE FROM group_members WHERE group_id = $1 AND user_id = $2', [group.id, userId]);
     await client.query('DELETE FROM chat_members WHERE chat_id = $1 AND user_id = $2', [group.chat_id, userId]);
     await client.query('DELETE FROM group_key_envelopes WHERE group_id = $1 AND user_id = $2', [group.id, userId]);
-    await client.query('UPDATE groups SET pending_version = COALESCE(pending_version, key_version + 1) WHERE id = $1', [group.id]);
+    await client.query('UPDATE groups SET membership_revision = membership_revision + 1, pending_version = COALESCE(pending_version, key_version + 1) WHERE id = $1', [group.id]);
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -125,7 +125,7 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
     if (Number(owned.rows[0].n) >= MAX_GROUPS_PER_OWNER) return reply.code(409).send({ error: 'Too many groups' });
 
     // Optional: the creator's client may upload version-1 envelopes right away (must cover every member).
-    let envelopes: { userId: string; wrapped: string }[] | null = null;
+    let envelopes: { userId: string; wrapped: string; fingerprint: string }[] | null = null;
     if (request.body?.envelopes !== undefined) {
       const parsed = parseEnvelopes(request.body.envelopes, all);
       if (!parsed) return reply.code(400).send({ error: 'envelopes must contain one wrapped key for every member' });
@@ -144,6 +144,16 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
         await client.query('INSERT INTO chat_members (chat_id, user_id) VALUES ($1, $2)', [chat.rows[0].id, id]);
         await client.query('INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, $3)', [group.rows[0].id, id, id === userId ? 'owner' : 'member']);
       }
+      if (envelopes) {
+        const current = (await client.query<{ user_id: string; fingerprint: string }>(
+          'SELECT user_id, fingerprint FROM user_crypto_identities WHERE user_id IN (SELECT value FROM json_each($1))', [JSON.stringify(all)]
+        )).rows;
+        const fingerprints = new Map(current.map((row) => [row.user_id, row.fingerprint]));
+        if (envelopes.some((envelope) => fingerprints.get(envelope.userId) !== envelope.fingerprint)) {
+          await client.query('ROLLBACK');
+          return reply.code(409).send({ error: 'A member identity changed; refresh before creating' });
+        }
+      }
       for (const envelope of envelopes ?? []) {
         await client.query('INSERT INTO group_key_envelopes (group_id, version, user_id, wrapped, wrapped_by) VALUES ($1, 1, $2, $3, $4)', [group.rows[0].id, envelope.userId, envelope.wrapped, userId]);
       }
@@ -159,17 +169,18 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
   });
 
   // Exactly one wrapped key per expected user id; no extras, no duplicates.
-  const parseEnvelopes = (value: unknown, expected: string[]): { userId: string; wrapped: string }[] | null => {
+  const parseEnvelopes = (value: unknown, expected: string[]): { userId: string; wrapped: string; fingerprint: string }[] | null => {
     if (!Array.isArray(value) || value.length !== expected.length) return null;
     const seen = new Set<string>();
-    const out: { userId: string; wrapped: string }[] = [];
+    const out: { userId: string; wrapped: string; fingerprint: string }[] = [];
     for (const item of value) {
       if (typeof item !== 'object' || item === null) return null;
       const userId = parseId((item as { userId?: unknown }).userId);
       const wrapped = parseWrapped((item as { wrapped?: unknown }).wrapped);
-      if (!userId || !wrapped || seen.has(userId) || !expected.includes(userId)) return null;
+      const fingerprint = (item as { fingerprint?: unknown }).fingerprint;
+      if (!userId || !wrapped || typeof fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(fingerprint) || seen.has(userId) || !expected.includes(userId)) return null;
       seen.add(userId);
-      out.push({ userId, wrapped });
+      out.push({ userId, wrapped, fingerprint });
     }
     return out;
   };
@@ -177,18 +188,18 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
   app.get<{ Params: { id: string } }>('/api/groups/:id', { preHandler: app.requireUser, config: { rateLimit: READ } }, async (request, reply) => {
     const group = await mine(request.params.id, request.user!.id, reply);
     if (!group) return;
-    const members = await db.query<{ id: string; username: string; display_name: string; role: Role; public_jwk: unknown }>(
-      `SELECT u.id, u.username, u.display_name, gm.role, ci.public_jwk
+    const members = await db.query<{ id: string; username: string; display_name: string; role: Role; public_jwk: unknown; fingerprint: string | null }>(
+      `SELECT u.id, u.username, u.display_name, gm.role, ci.public_jwk, ci.fingerprint
        FROM group_members gm JOIN users u ON u.id = gm.user_id LEFT JOIN user_crypto_identities ci ON ci.user_id = u.id
        WHERE gm.group_id = $1 ORDER BY CASE gm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, u.display_name, u.id LIMIT ${MAX_MEMBERS}`,
       [group.id]
     );
     return {
       id: group.id, chatId: group.chat_id, title: group.title, avatarPath: group.avatar_path, role: group.role,
-      memberCount: members.rows.length, keyVersion: group.key_version,
+      memberCount: members.rows.length, membershipRevision: group.membership_revision, keyVersion: group.key_version,
       // Set (to the version to upload) while a rotation is required; only owners/admins can act on it.
       pendingKeyVersion: group.pending_version,
-      members: members.rows.map((m) => ({ id: m.id, username: m.username, displayName: m.display_name, role: m.role, publicKey: m.public_jwk ?? null }))
+      members: members.rows.map((m) => ({ id: m.id, username: m.username, displayName: m.display_name, role: m.role, publicKey: m.public_jwk ?? null, fingerprint: m.fingerprint }))
     };
   });
 
@@ -219,19 +230,29 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
     return reply.code(204).send();
   });
 
-  app.post<{ Params: { id: string }; Body: { userId?: unknown; envelope?: unknown } }>('/api/groups/:id/members', { preHandler: app.requireUser, config: { rateLimit: WRITE } }, async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: { userId?: unknown } }>('/api/groups/:id/members', { preHandler: app.requireUser, config: { rateLimit: WRITE } }, async (request, reply) => {
     const group = await mine(request.params.id, request.user!.id, reply);
     if (!group) return;
     if (!staff(group)) return reply.code(403).send({ error: 'Only owners and admins can add members' });
     const target = parseId(request.body?.userId);
-    const wrapped = parseWrapped(request.body?.envelope);
-    if (!target || !wrapped) return reply.code(400).send({ error: 'userId and envelope are required' });
+    if (!target) return reply.code(400).send({ error: 'userId is required' });
     if (group.key_version < 1 || group.pending_version !== null) return reply.code(409).send({ error: 'Group key rotation pending; upload the new key first' });
     if ((await db.query('SELECT 1 FROM users WHERE id = $1', [target])).rowCount !== 1) return reply.code(404).send({ error: 'User not found' });
     if (!(await identityOf(target))) return reply.code(409).send({ error: 'That user has no encryption identity yet' });
     const client = await db.connect();
     try {
       await client.query('BEGIN');
+      const fresh = (await client.query<{ key_version: number; pending_version: number | null; role: Role | null }>(
+        'SELECT g.key_version, g.pending_version, gm.role FROM groups g LEFT JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = $2 WHERE g.id = $1', [group.id, request.user!.id]
+      )).rows[0];
+      if (!fresh?.role || (fresh.role !== 'owner' && fresh.role !== 'admin')) {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'Only owners and admins can add members' });
+      }
+      if (fresh.key_version < 1 || fresh.pending_version !== null) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({ error: 'Group key rotation pending; upload the new key first' });
+      }
       if ((await client.query('SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2', [group.id, target])).rowCount === 1) {
         await client.query('ROLLBACK');
         return reply.code(409).send({ error: 'Already a member' });
@@ -243,8 +264,8 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
       }
       await client.query("INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, 'member')", [group.id, target]);
       await client.query('INSERT OR IGNORE INTO chat_members (chat_id, user_id) VALUES ($1, $2)', [group.chat_id, target]);
-      // Only the CURRENT key version: the new member cannot read older messages.
-      await client.query('INSERT INTO group_key_envelopes (group_id, version, user_id, wrapped, wrapped_by) VALUES ($1, $2, $3, $4, $5)', [group.id, group.key_version, target, wrapped, request.user!.id]);
+      // No placeholder envelope: block posting until a verified new key covers all current members.
+      await client.query('UPDATE groups SET membership_revision = membership_revision + 1, pending_version = key_version + 1 WHERE id = $1', [group.id]);
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK').catch(() => undefined);
@@ -294,18 +315,30 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
     return rows.rows.map((r) => ({ version: r.version, wrapped: r.wrapped, wrappedBy: r.wrapped_by }));
   });
 
-  app.put<{ Params: { id: string }; Body: { version?: unknown; envelopes?: unknown } }>('/api/groups/:id/keys', { preHandler: app.requireUser, config: { rateLimit: WRITE } }, async (request, reply) => {
+  app.put<{ Params: { id: string }; Body: { version?: unknown; membershipRevision?: unknown; envelopes?: unknown } }>('/api/groups/:id/keys', { preHandler: app.requireUser, config: { rateLimit: WRITE } }, async (request, reply) => {
     const group = await mine(request.params.id, request.user!.id, reply);
     if (!group) return;
     if (!staff(group)) return reply.code(403).send({ error: 'Only owners and admins can rotate the key' });
     const version = parseVersion(request.body?.version);
     if (!version) return reply.code(400).send({ error: 'version must be a positive integer' });
+    const membershipRevision = request.body?.membershipRevision;
+    if (typeof membershipRevision !== 'number' || !Number.isSafeInteger(membershipRevision) || membershipRevision < 0) return reply.code(400).send({ error: 'membershipRevision is required' });
     const client = await db.connect();
     try {
       await client.query('BEGIN');
       // Re-read inside the transaction: members/pending may have changed since the first read.
-      const fresh = await client.query<{ key_version: number; pending_version: number | null }>('SELECT key_version, pending_version FROM groups WHERE id = $1', [group.id]);
+      const fresh = await client.query<{ key_version: number; pending_version: number | null; membership_revision: number; role: Role | null }>(
+        'SELECT g.key_version, g.pending_version, g.membership_revision, gm.role FROM groups g LEFT JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = $2 WHERE g.id = $1', [group.id, request.user!.id]
+      );
       const current = fresh.rows[0];
+      if (!current?.role || (current.role !== 'owner' && current.role !== 'admin')) {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'Only owners and admins can rotate the key' });
+      }
+      if (membershipRevision !== current.membership_revision) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({ error: 'Group membership changed; refresh before rotating' });
+      }
       if (version !== current.pending_version && version !== current.key_version + 1) {
         await client.query('ROLLBACK');
         return reply.code(409).send({ error: 'Wrong key version', keyVersion: current.key_version, pendingKeyVersion: current.pending_version });
@@ -315,6 +348,14 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
       if (!envelopes) {
         await client.query('ROLLBACK');
         return reply.code(400).send({ error: 'envelopes must contain one wrapped key for every current member' });
+      }
+      const identities = (await client.query<{ user_id: string; fingerprint: string }>(
+        'SELECT user_id, fingerprint FROM user_crypto_identities WHERE user_id IN (SELECT user_id FROM group_members WHERE group_id = $1)', [group.id]
+      )).rows;
+      const currentFingerprints = new Map(identities.map((row) => [row.user_id, row.fingerprint]));
+      if (envelopes.some((envelope) => !currentFingerprints.get(envelope.userId) || currentFingerprints.get(envelope.userId) !== envelope.fingerprint)) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({ error: 'A member identity changed; refresh before rotating' });
       }
       for (const envelope of envelopes) {
         await client.query('INSERT INTO group_key_envelopes (group_id, version, user_id, wrapped, wrapped_by) VALUES ($1, $2, $3, $4, $5)', [group.id, version, envelope.userId, envelope.wrapped, request.user!.id]);

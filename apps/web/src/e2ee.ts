@@ -102,9 +102,25 @@ const writePin = async (memberId: string, value: string): Promise<void> => {
   } finally { db.close(); }
 };
 const pinMember = async (memberId: string, value: string): Promise<void> => {
-  const existing = await readPin(memberId);
-  if (existing && existing !== value) throw new KeyChangedError(memberId, existing, value);
-  if (!existing) await writePin(memberId, value);
+  if (!identity) throw new Error('Encryption identity is not initialized');
+  const db = await openDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction('pins', 'readwrite');
+      const store = transaction.objectStore('pins');
+      const pinId = `${identity!.userId}:${memberId}`;
+      let changed: KeyChangedError | undefined;
+      const request = store.get(pinId);
+      request.onsuccess = () => {
+        const existing = request.result as string | undefined;
+        if (existing && existing !== value) { changed = new KeyChangedError(memberId, existing, value); transaction.abort(); }
+        else if (!existing) store.put(value, pinId);
+      };
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => reject(changed ?? transaction.error);
+      transaction.onerror = () => reject(transaction.error);
+    });
+  } finally { db.close(); }
 };
 const fingerprint = async (jwk: JsonWebKey): Promise<string> => {
   const digest = await crypto.subtle.digest('SHA-256', encoder.encode(`P-256:${jwk.x}:${jwk.y}`));
@@ -357,16 +373,35 @@ const groupKeyCandidates = async (chatId: string, version: number | undefined): 
 /** Wrap `raw` for every current member and upload it as `version`. */
 const uploadGroupKey = async (ctx: GroupCtx, detail: GroupDetail, version: number, raw: Uint8Array): Promise<void> => {
   if (!identity) throw new Error('Encryption identity is not initialized');
-  if (detail.members.some((member) => !member.publicKey)) throw new Error('یکی از اعضا هنوز رمزنگاری را راه‌اندازی نکرده است.');
+  // Complete the whole identity check before producing even one envelope. New contacts use TOFU;
+  // a changed pin always stops both manual and background rotations until explicitly accepted.
+  const recipients = await verifyGroupRecipients(detail);
   const envelopes = await Promise.all(detail.members.map(async (member) => {
     const wrapped = await wrapKey(groupScope(ctx.groupId, version), member.id, identity!.userId, member.publicKey!, raw);
-    return { userId: member.id, wrapped: wrapped.nonce + wrapped.ciphertext };
+    return { userId: member.id, fingerprint: recipients.get(member.id)!, wrapped: wrapped.nonce + wrapped.ciphertext };
   }));
-  await groupsApi.putKeys(ctx.groupId, version, envelopes);
+  await groupsApi.putKeys(ctx.groupId, version, detail.membershipRevision, envelopes);
   ctx.raws.set(version, raw);
   ctx.keys.set(version, await crypto.subtle.importKey('raw', buffer(raw), 'AES-GCM', false, ['encrypt', 'decrypt']));
   ctx.latest = Math.max(ctx.latest, version);
   ctx.checkedAt = Date.now();
+};
+
+const verifyGroupRecipients = async (detail: GroupDetail): Promise<Map<string, string>> => {
+  if (!identity) throw new Error('Encryption identity is not initialized');
+  if (detail.members.length !== detail.memberCount || !detail.members.some((member) => member.id === identity!.userId)) throw new Error('فهرست اعضای گروه نامعتبر است.');
+  const recipients = new Map<string, string>();
+  for (const member of detail.members) {
+    if (!member.publicKey || !member.fingerprint) throw new Error('یکی از اعضا هنوز رمزنگاری را راه‌اندازی نکرده است.');
+    if (recipients.has(member.id)) throw new Error('فهرست اعضای گروه نامعتبر است.');
+    const actual = await fingerprint(member.publicKey);
+    if (actual !== member.fingerprint) throw new Error('اثر انگشت کلید عضو معتبر نیست.');
+    if (member.id === identity.userId) {
+      if (actual !== identity.fingerprint) throw new Error('کلید رمزنگاری حساب شما تغییر کرده است.');
+    } else await pinMember(member.id, actual);
+    recipients.set(member.id, actual);
+  }
+  return recipients;
 };
 
 /** Owner/admin: create the first key, or finish a rotation left pending by a removal/leave. Members: just load the key. */
@@ -389,16 +424,6 @@ export const rotateGroupKey = async (chatId: string, groupId?: string): Promise<
   await uploadGroupKey(ctx, detail, detail.pendingKeyVersion ?? detail.keyVersion + 1, crypto.getRandomValues(new Uint8Array(32)));
 };
 
-/** Wrap the current group key for a person about to be added (the server needs it with the add request). */
-export const wrapCurrentGroupKeyFor = async (chatId: string, userId: string, publicKey: JsonWebKey): Promise<string> => {
-  if (!identity) throw new Error('Encryption identity is not initialized');
-  const ctx = groupCtx(chatId);
-  if (!ctx.raws.has(ctx.latest)) await fetchGroupKeys(ctx, 'latest');
-  const raw = ctx.raws.get(ctx.latest);
-  if (!raw) throw new Error('کلید گروه در دسترس نیست.');
-  const wrapped = await wrapKey(groupScope(ctx.groupId, ctx.latest), userId, identity.userId, publicKey, raw);
-  return wrapped.nonce + wrapped.ciphertext;
-};
 export const currentGroupKeyVersion = (chatId: string): number => groupCtx(chatId).latest;
 
 const chatKey = (chatId: string): Promise<CryptoKey> => {

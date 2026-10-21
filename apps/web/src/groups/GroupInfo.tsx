@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CloseIcon, TrashIcon } from '../icons.js';
 import { Avatar } from '../ui.js';
-import { ensureGroupKeyed, forgetGroup, rotateGroupKey } from '../e2ee.js';
+import { groupFingerprint } from '../chat/ChatHeader.js';
+import { ensureGroupKeyed, forgetGroup, KeyChangedError } from '../e2ee.js';
 import { GroupAvatar } from './GroupIcon.js';
 import { PeoplePicker } from './PeoplePicker.js';
 import { groupsApi, type GroupDetail } from './groupsApi.js';
@@ -10,11 +11,6 @@ import './groups.css';
 type Props = { open: boolean; groupId: string; chatId: string; onClose: () => void; onChanged: () => void; onGone: () => void };
 
 const roleLabel = { owner: 'مالک', admin: 'مدیر', member: 'عضو' } as const;
-const randomEnvelope = (): string => {
-  const bytes = crypto.getRandomValues(new Uint8Array(48));
-  return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
-};
-
 export function GroupInfo({ open, groupId, chatId, onClose, onChanged, onGone }: Props) {
   const ref = useRef<HTMLDialogElement>(null);
   const [detail, setDetail] = useState<GroupDetail>();
@@ -32,18 +28,17 @@ export function GroupInfo({ open, groupId, chatId, onClose, onChanged, onGone }:
 
   const run = async (action: () => Promise<unknown>, fail: string, after?: () => void) => {
     setBusy(true); setNote('');
-    try { await action(); after?.(); } catch (error) { setNote((error as { status?: number; message?: string })?.status ? `${fail} (${(error as Error).message})` : fail); } finally { setBusy(false); }
+    try { await action(); after?.(); } catch (error) { setNote(error instanceof KeyChangedError ? 'کلید رمزنگاری یکی از اعضا تغییر کرده است. اثر انگشت جدید را در گفتگو بررسی و تأیید کنید؛ چرخش کلید تا آن زمان متوقف می‌ماند.' : (error as { status?: number; message?: string })?.status ? `${fail} (${(error as Error).message})` : fail); } finally { setBusy(false); }
   };
 
   const owner = detail?.role === 'owner';
   const staff = owner || detail?.role === 'admin';
 
   const addMember = (user: { id: string; displayName: string }) => run(async () => {
-    // The server needs an envelope with the add request but we cannot wrap for someone whose key we have not
-    // seen yet; so the add carries a placeholder and we immediately start a NEW key version for everybody,
-    // which the newcomer receives properly. The newcomer therefore cannot read anything sent before.
-    await groupsApi.addMember(groupId, user.id, randomEnvelope());
-    await rotateGroupKey(chatId, groupId);
+    // Adding a member leaves rotation pending until every recipient's identity has been checked.
+    await groupsApi.addMember(groupId, user.id);
+    await load(); onChanged();
+    await ensureGroupKeyed(chatId, groupId);
     await load(); onChanged();
     setNote(`${user.displayName} اضافه شد؛ فقط پیام‌های بعدی را می‌خواند.`);
   }, 'افزودن عضو انجام نشد.');
@@ -52,6 +47,7 @@ export function GroupInfo({ open, groupId, chatId, onClose, onChanged, onGone }:
     if (!window.confirm(`${member.displayName} از گروه حذف شود؟`)) return;
     void run(async () => {
       await groupsApi.removeMember(groupId, member.id);
+      await load(); onChanged();
       await ensureGroupKeyed(chatId, groupId); // new key for the remaining members
       await load(); onChanged();
     }, 'حذف عضو انجام نشد.');
@@ -106,7 +102,7 @@ export function GroupInfo({ open, groupId, chatId, onClose, onChanged, onGone }:
               {detail.members.map((member) => (
                 <div className="channel-row" key={member.id}>
                   <Avatar user={{ id: member.id, displayName: member.displayName, avatarPath: null, username: member.username } as never} size={40} />
-                  <span className="channel-row__name"><strong dir="auto">{member.displayName}</strong><small>{`⁦@${member.username}⁩`} · {roleLabel[member.role]}</small></span>
+                  <span className="channel-row__name"><strong dir="auto">{member.displayName}</strong><small>{`⁦@${member.username}⁩`} · {roleLabel[member.role]}</small>{member.fingerprint && <code dir="ltr" title="اثر انگشت کلید؛ از راهی دیگر با عضو مقایسه کنید">{groupFingerprint(member.fingerprint)}</code>}</span>
                   {owner && member.role !== 'owner' && (
                     <>
                       <button className="text-button" type="button" disabled={busy} onClick={() => void setAdmin(member)}>{member.role === 'admin' ? 'حذف مدیر' : 'مدیر کن'}</button>

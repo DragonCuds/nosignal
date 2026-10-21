@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api, type Chat, type Gif, type GifMessagePayload, type Message, type OutboundEncryptedPayload, type RealtimeEvent, type Sticker, type StickerMessagePayload, type User } from './api.js';
 import { DownIcon } from './icons.js';
-import { acceptKeyChange, checkKeyChanges, decryptMessage as decryptPlain, encryptContent } from './e2ee.js';
+import { acceptKeyChange, checkKeyChanges, decryptMessage as decryptPlain, encryptContent, KeyChangedError } from './e2ee.js';
 import { discard as discardOutbox, enqueue, listOutbox, newClientMsgId, onOutboxChange, onOutboxSent, retryNow, type OutboxRow } from './outbox.js';
 import { cacheEventMessage, cacheMessages, forgetPlain, plainOf, readCachedMessages, rememberPlain, type SyncSignal } from './sync.js';
 import { decryptMessageMedia as decryptMessage, decryptMessagesMedia as decryptMessages, encryptMediaMessage } from './encrypted-media.js';
@@ -255,15 +255,6 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
   // Groups: an owner/admin client that opens the group finishes a pending key rotation (and makes the first key).
   const groupId = chat.type === 'group' ? chat.groupId : undefined;
   if (groupId) registerGroupChat(chat.id, groupId);
-  useEffect(() => {
-    if (!groupId) return;
-    let live = true;
-    const tick = () => { void ensureGroupKeyed(chat.id, groupId).catch(() => undefined); };
-    tick();
-    const timer = window.setInterval(tick, 10_000);
-    return () => { live = false; window.clearInterval(timer); };
-  }, [chat.id, groupId]);
-
   useLayoutEffect(() => {
     if (status !== 'ready' || !pendingInitialScroll.current) return;
     pendingInitialScroll.current = false;
@@ -292,6 +283,17 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
       setKeyChanges(found.map((item) => ({ ...item, name: names.get(item.memberId) ?? chat.peer?.displayName ?? 'مخاطب' })));
     } catch { /* offline or not ready: try again later */ }
   });
+  useEffect(() => {
+    if (!groupId) return;
+    const tick = () => {
+      void ensureGroupKeyed(chat.id, groupId).catch((caught: unknown) => {
+        if (caught instanceof KeyChangedError) void refreshKeyChanges();
+      });
+    };
+    tick();
+    const timer = window.setInterval(tick, 10_000);
+    return () => window.clearInterval(timer);
+  }, [chat.id, groupId, refreshKeyChanges]);
   useEffect(() => { setKeyChanges([]); setKeyDismissed(false); void refreshKeyChanges(); }, [chat.id]);
   const undecryptable = messages.filter((item) => item.text?.startsWith('🔒 ')).length;
   useEffect(() => { if (undecryptable) void refreshKeyChanges(); }, [undecryptable]);
