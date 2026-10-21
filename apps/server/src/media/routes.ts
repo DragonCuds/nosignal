@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { requireUser } from '../auth.js';
 import { db } from '../db.js';
+import { commitStorage, releaseStorage, reserveStorage, StorageQuotaError } from '../storage-quota.js';
 import { cleanupEncryptedMedia } from './cleanup.js';
 import { importStickerPack } from './import-pack.js';
 import { getTelegramImport, publicJob, startTelegramImport, telegramImportEnabled } from './telegram-import.js';
@@ -129,25 +130,40 @@ export const registerMediaRoutes = async (app: FastifyInstance): Promise<void> =
     if (!chatId) return reply.code(400).send({ error: 'Invalid chat id' });
     const membership = await db.query('SELECT 1 FROM chat_members WHERE chat_id = $1 AND user_id = $2', [chatId, request.user!.id]);
     if (membership.rowCount !== 1) return reply.code(404).send({ error: 'Chat not found' });
-    const upload = await request.file({ limits: { files: 1, fileSize: MAX_ENCRYPTED_MEDIA_BYTES, fields: 0, parts: 1 } });
-    if (!upload || upload.mimetype !== 'application/octet-stream') return reply.code(400).send({ error: 'Encrypted media blob is required' });
-    const bytes = await upload.toBuffer();
-    if (upload.file.truncated || bytes.length < 17 || bytes.length > MAX_ENCRYPTED_MEDIA_BYTES) return reply.code(413).send({ error: 'Encrypted media is empty or too large' });
-    const id = randomUUID();
-    const relativePath = `encrypted/${id}.bin`;
-    await ensureStorage();
-    const file = resolve(mediaDir, relativePath);
-    await writeFile(file, bytes, { flag: 'wx', mode: 0o600 });
+    const declared = Number(request.headers['content-length']);
+    const upperBound = Number.isSafeInteger(declared) && declared > 0 ? declared : MAX_ENCRYPTED_MEDIA_BYTES;
+    let reservation: string;
     try {
-      await db.query(
-        'INSERT INTO encrypted_chat_media (id, chat_id, uploader_id, file_path, byte_size) VALUES ($1, $2, $3, $4, $5)',
-        [id, chatId, request.user!.id, relativePath, bytes.length]
-      );
+      reservation = await reserveStorage(request.user!.id, upperBound);
     } catch (error) {
-      await rm(file, { force: true });
+      if (error instanceof StorageQuotaError) return reply.code(error.status).send({ error: error.message });
       throw error;
     }
-    return reply.code(201).send({ id });
+    try {
+      const upload = await request.file({ limits: { files: 1, fileSize: MAX_ENCRYPTED_MEDIA_BYTES, fields: 0, parts: 1 } });
+      if (!upload || upload.mimetype !== 'application/octet-stream') return reply.code(400).send({ error: 'Encrypted media blob is required' });
+      const bytes = await upload.toBuffer();
+      if (upload.file.truncated || bytes.length < 17 || bytes.length > MAX_ENCRYPTED_MEDIA_BYTES) return reply.code(413).send({ error: 'Encrypted media is empty or too large' });
+      const id = randomUUID();
+      const relativePath = `encrypted/${id}.bin`;
+      await ensureStorage();
+      const file = resolve(mediaDir, relativePath);
+      await writeFile(file, bytes, { flag: 'wx', mode: 0o600 });
+      try {
+        await commitStorage(reservation, bytes.length, async (client) => {
+          await client.query(
+            'INSERT INTO encrypted_chat_media (id, chat_id, uploader_id, file_path, byte_size) VALUES ($1, $2, $3, $4, $5)',
+            [id, chatId, request.user!.id, relativePath, bytes.length]
+          );
+        });
+      } catch (error) {
+        await rm(file, { force: true });
+        throw error;
+      }
+      return reply.code(201).send({ id });
+    } finally {
+      await releaseStorage(reservation);
+    }
   });
 
   app.get<{ Params: { id: string } }>('/api/encrypted-media/:id', {

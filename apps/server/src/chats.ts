@@ -585,7 +585,8 @@ export const registerChatRoutes = async (app: FastifyInstance): Promise<void> =>
         deleted = (await client.query<{ id: string }>(
         `UPDATE messages
          SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), text = NULL, payload = NULL,
-             encryption_version = NULL, cipher_id = NULL, nonce = NULL, ciphertext = NULL
+             encryption_version = NULL, cipher_id = NULL, nonce = NULL, ciphertext = NULL,
+             encrypted_media_id = NULL
          WHERE id = $1 AND chat_id = $2 AND (sender_id = $3 OR $4 = 1) AND deleted_at IS NULL
          RETURNING id`,
         [messageId, chatId, request.user!.id, gate.staff ? 1 : 0]

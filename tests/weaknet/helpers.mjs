@@ -80,6 +80,10 @@ export const bootApp = async ({ routes = ['chats'], env = {}, prefix = 'weaknet'
     out.attachments = await imp('apps/server/src/attachments/index.ts');
     await out.attachments.registerAttachments(app);
   }
+  if (routes.includes('media')) {
+    out.media = await imp('apps/server/src/media/routes.ts');
+    await out.media.registerMediaRoutes(app);
+  }
   await app.listen({ host: '127.0.0.1', port });
   // request against `base` (default: the server directly; pass a proxy origin to go through netsim)
   out.req = (method, url, { user = 'a', body, headers = {}, base = origin, signal } = {}) => fetch(`${base}${url}`, {
