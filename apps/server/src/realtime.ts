@@ -3,7 +3,7 @@ import type { IncomingMessage } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { FastifyInstance } from 'fastify';
 import { db } from './db.js';
-import { getSessionUserForToken, isTrustedOrigin } from './auth.js';
+import { currentTokenHash, getSessionUserForToken, isSessionTokenHashValid, isTrustedOrigin, onSessionsRevoked, tokenHash as hashToken, type SessionRevocation } from './auth.js';
 
 const SESSION_COOKIE = 'tel_session';
 const HEARTBEAT_MS = 25_000;
@@ -14,8 +14,21 @@ const SSE_KEEPALIVE_MS = 15_000;
 const SSE_MAX_BUFFERED = 1024 * 1024;
 
 // One connected client, over WebSocket or SSE. `send` never throws.
-type SocketState = { socket?: WebSocket; userId: string; alive: boolean; events: number[]; send(event: RealtimeServerEvent): void };
-type RealtimeService = { broadcastToChat(chatId: string, event: RealtimeServerEvent): void };
+// `tokenHash` identifies the session the connection was authenticated with; `close` ends it (WS code 4401 / SSE end).
+type SocketState = { socket?: WebSocket; userId: string; tokenHash: string | null; alive: boolean; events: number[]; send(event: RealtimeServerEvent): void; close(): void };
+type RealtimeService = {
+  broadcastToChat(chatId: string, event: RealtimeServerEvent): void;
+  /** Close live connections of revoked sessions: one session (tokenHash) or all of userId except exceptTokenHash. */
+  closeSessionConnections(revocation: SessionRevocation): number;
+  /** Push an event to every live connection of these users (no chat-membership check). */
+  sendToUsers(userIds: string[], event: RealtimeServerEvent): void;
+};
+
+/** Tell users a chat appeared for them. Safe when realtime is not registered (tests). */
+export const notifyChatNew = (app: FastifyInstance, userIds: string[], chatId: string): void => {
+  (app.realtime as Partial<RealtimeService> | undefined)?.sendToUsers?.(userIds, { type: 'chat.new', chatId });
+};
+export const WS_CLOSE_SESSION_REVOKED = 4401;
 
 declare module 'fastify' {
   interface FastifyInstance { realtime: RealtimeService }
@@ -77,16 +90,34 @@ export const registerRealtime = async (app: FastifyInstance): Promise<void> => {
     }).catch((error: unknown) => app.log.error(error, 'Failed to process realtime event'));
   };
 
+  const closeSessionConnections = ({ userId, tokenHash, exceptTokenHash }: SessionRevocation): number => {
+    let closed = 0;
+    for (const state of [...sockets]) {
+      const match = tokenHash ? state.tokenHash === tokenHash : userId !== undefined && state.userId === userId && (!exceptTokenHash || state.tokenHash !== exceptTokenHash);
+      if (!match) continue;
+      state.close();
+      disconnect(state);
+      closed += 1;
+    }
+    return closed;
+  };
+  onSessionsRevoked((revocation) => { closeSessionConnections(revocation); });
+
   app.decorate('realtime', {
     broadcastToChat(chatId, event) {
       for (const state of sockets) void isChatMember(chatId, state.userId).then((member) => {
         if (member) state.send(event);
       }).catch((error: unknown) => app.log.error(error, 'Failed to deliver realtime event'));
+    },
+    closeSessionConnections,
+    sendToUsers(userIds, event) {
+      const wanted = new Set(userIds);
+      for (const state of sockets) if (wanted.has(state.userId)) state.send(event);
     }
   });
 
-  wss.on('connection', (socket: WebSocket, _request: IncomingMessage, userId: string) => {
-    const state: SocketState = { socket, userId, alive: true, events: [], send: (event) => send(socket, event) };
+  wss.on('connection', (socket: WebSocket, _request: IncomingMessage, userId: string, tokenHash: string) => {
+    const state: SocketState = { socket, userId, tokenHash, alive: true, events: [], send: (event) => send(socket, event), close: () => socket.close(WS_CLOSE_SESSION_REVOKED, 'session revoked') };
     connect(state);
     socket.on('pong', () => { state.alive = true; });
     socket.on('message', (data: WebSocket.RawData) => {
@@ -126,7 +157,7 @@ export const registerRealtime = async (app: FastifyInstance): Promise<void> => {
       if (raw.writableLength > SSE_MAX_BUFFERED) { raw.destroy(); return; }
       raw.write(chunk);
     };
-    const state: SocketState = { userId, alive: true, events: [], send: (event) => write(`data: ${JSON.stringify(event)}\n\n`) };
+    const state: SocketState = { userId, tokenHash: currentTokenHash(request), alive: true, events: [], send: (event) => write(`data: ${JSON.stringify(event)}\n\n`), close: () => { if (!raw.destroyed && !raw.writableEnded) raw.end(); } };
     const keepalive = setInterval(() => write(': keepalive\n\n'), SSE_KEEPALIVE_MS);
     keepalive.unref();
     const cleanup = (): void => { clearInterval(keepalive); disconnect(state); };
@@ -146,7 +177,16 @@ export const registerRealtime = async (app: FastifyInstance): Promise<void> => {
     return reply.code(204).send();
   });
 
+  // Fallback for revocations without a hook (expiry, idle cleanup, account deletion): re-verify open sessions.
+  const reverify = async (): Promise<void> => {
+    const hashes = new Set<string>();
+    for (const state of sockets) if (state.tokenHash) hashes.add(state.tokenHash);
+    for (const hash of hashes) {
+      if (!(await isSessionTokenHashValid(hash))) closeSessionConnections({ tokenHash: hash });
+    }
+  };
   const heartbeat = setInterval(() => {
+    void reverify().catch((error: unknown) => app.log.error(error, 'Realtime session re-verification failed'));
     for (const state of sockets) {
       if (!state.socket) continue;
       if (!state.alive) state.socket.terminate();
@@ -164,7 +204,7 @@ export const registerRealtime = async (app: FastifyInstance): Promise<void> => {
     if (!token) { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); socket.destroy(); return; }
     void getSessionUserForToken(token).then((user) => {
       if (!user) { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); socket.destroy(); return; }
-      wss.handleUpgrade(request, socket, head, (websocket) => wss.emit('connection', websocket, request, user.id));
+      wss.handleUpgrade(request, socket, head, (websocket) => wss.emit('connection', websocket, request, user.id, hashToken(token)));
     }).catch((error: unknown) => { app.log.error(error, 'WebSocket authentication failed'); socket.destroy(); });
   });
 

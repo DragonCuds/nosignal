@@ -1,6 +1,7 @@
 import argon2 from 'argon2';
 import '@fastify/cookie';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { config } from './config.js';
 import { db } from './db.js';
@@ -56,8 +57,23 @@ export const allowLoginAttempt = (username: string, now = Date.now()): boolean =
 
 export const resetLoginAttempts = (): void => loginAttempts.clear();
 
-const tokenHash = (token: string): string =>
+export const tokenHash = (token: string): string =>
   createHmac('sha256', config.sessionSecret).update(token).digest('hex');
+
+/** Which live connections to drop: one session (tokenHash), or every session of userId except exceptTokenHash. */
+export type SessionRevocation = { userId?: string; tokenHash?: string | null; exceptTokenHash?: string | null };
+const revocations = new EventEmitter();
+revocations.setMaxListeners(0);
+/** Realtime subscribes here; it closes the matching WebSocket/SSE connections. */
+export const onSessionsRevoked = (listener: (revocation: SessionRevocation) => void): void => { revocations.on('revoked', listener); };
+/** Call after sessions were deleted from the database. */
+export const notifySessionsRevoked = (revocation: SessionRevocation): void => { revocations.emit('revoked', revocation); };
+/** Is this session token still valid (not deleted, expired or idle)? Used by realtime to re-verify open sockets. */
+export const isSessionTokenHashValid = async (hash: string): Promise<boolean> =>
+  (await db.query(
+    `SELECT 1 FROM sessions WHERE token_hash = $1 AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AND ${IDLE_OK}`,
+    [hash]
+  )).rowCount === 1;
 
 // Secure cookies whenever clients reach us over HTTPS: production (behind a TLS proxy) or own TLS.
 let cookieSecure = config.isProduction || config.tlsMode !== 'off';
@@ -111,6 +127,7 @@ export const createSession = async (
   } finally {
     client.release();
   }
+  if (previousToken) notifySessionsRevoked({ tokenHash: tokenHash(previousToken) });
   setSessionCookie(reply, token);
 };
 
@@ -184,7 +201,9 @@ declare module 'fastify' {
 }
 
 export const deleteSession = async (token: string | undefined): Promise<void> => {
-  if (token) await db.query('DELETE FROM sessions WHERE token_hash = $1', [tokenHash(token)]);
+  if (!token) return;
+  await db.query('DELETE FROM sessions WHERE token_hash = $1', [tokenHash(token)]);
+  notifySessionsRevoked({ tokenHash: tokenHash(token) });
 };
 
 export const getSessionId = async (request: FastifyRequest): Promise<string | null> => {

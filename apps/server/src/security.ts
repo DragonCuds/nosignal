@@ -8,7 +8,7 @@ import {
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
 import { createHmac, randomBytes } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { clearSessionCookie, createSession, currentTokenHash, getSessionId, getSessionToken, verifyPassword } from './auth.js';
+import { clearSessionCookie, createSession, currentTokenHash, getSessionId, getSessionToken, notifySessionsRevoked, verifyPassword } from './auth.js';
 import { config } from './config.js';
 import { db } from './db.js';
 import { decryptMfaSecret, encryptMfaSecret, generateRecoveryCodes, generateTotpSecret, recoveryCodeHash, verifyTotp } from './totp.js';
@@ -205,6 +205,7 @@ export const registerSecurityRoutes = async (app: FastifyInstance): Promise<void
     } catch (error) {
       await client.query('ROLLBACK'); throw error;
     } finally { client.release(); }
+    notifySessionsRevoked({ userId: request.user!.id, exceptTokenHash: token });
     return reply.code(204).send();
   });
 
@@ -231,17 +232,19 @@ export const registerSecurityRoutes = async (app: FastifyInstance): Promise<void
   });
 
   app.delete<{ Params: { id: string } }>('/api/security/sessions/:id', { preHandler: app.requireUser }, async (request, reply) => {
-    const result = await db.query<{ current: boolean }>(
-      'DELETE FROM sessions WHERE id = $1 AND user_id = $2 RETURNING token_hash = $3 AS current',
+    const result = await db.query<{ current: boolean; token_hash: string }>(
+      'DELETE FROM sessions WHERE id = $1 AND user_id = $2 RETURNING token_hash = $3 AS current, token_hash',
       [request.params.id, request.user!.id, currentTokenHash(request)]
     );
     if (!result.rows[0]) return reply.code(404).send({ error: 'Session not found' });
+    notifySessionsRevoked({ tokenHash: result.rows[0].token_hash });
     if (result.rows[0].current) clearSessionCookie(reply);
     return reply.code(204).send();
   });
 
   app.post('/api/security/sessions/revoke-others', { preHandler: app.requireUser }, async (request, reply) => {
     await db.query('DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2', [request.user!.id, currentTokenHash(request)]);
+    notifySessionsRevoked({ userId: request.user!.id, exceptTokenHash: currentTokenHash(request) });
     return reply.code(204).send();
   });
 
@@ -350,6 +353,7 @@ export const registerSecurityRoutes = async (app: FastifyInstance): Promise<void
       await client.query('DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2', [request.user!.id, currentTokenHash(request)]);
       await client.query('COMMIT');
     } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+    notifySessionsRevoked({ userId: request.user!.id, exceptTokenHash: currentTokenHash(request) });
     return reply.code(204).send();
   });
 };

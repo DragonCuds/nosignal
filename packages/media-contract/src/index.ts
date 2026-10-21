@@ -52,6 +52,7 @@ export type RealtimeServerEvent =
   | { type: 'read'; chatId: string; userId: string; messageId: string }
   | { type: 'typing'; chatId: string; userId: string; isTyping: boolean }
   | { type: 'presence'; userId: string; online: boolean; lastSeen: string | null }
+  | { type: 'chat.new'; chatId: string } // you were added to a chat that is not in your list yet (new direct chat, group)
   | { type: 'pong'; t: number }
   | { type: 'hello' };
 

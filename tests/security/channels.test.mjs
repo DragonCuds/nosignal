@@ -193,6 +193,32 @@ test('revoke invite, leave, remove member', async () => {
   assert.equal((await send('owner', 'GET', `/api/channels/${state.id}`)).json().memberCount, 2);
 });
 
+test('removed member cannot rejoin with the same invite link; leaving does not ban; owner can lift the ban', async () => {
+  const inv = (await send('owner', 'POST', `/api/channels/${state.id}/invites`)).json();
+  // reader2 was removed in the previous test, so the old removal already banned them.
+  assert.equal((await send('reader2', 'POST', `/api/channels/join/${inv.token}`)).statusCode, 403);
+  assert.equal((await send('owner', 'DELETE', `/api/channels/${state.id}/bans/${ids.reader2}`)).statusCode, 204);
+  assert.equal((await send('reader2', 'POST', `/api/channels/join/${inv.token}`)).statusCode, 200);
+  assert.equal((await send('owner', 'DELETE', `/api/channels/${state.id}/members/${ids.reader2}`)).statusCode, 204);
+  const again = await send('reader2', 'POST', `/api/channels/join/${inv.token}`);
+  assert.equal(again.statusCode, 403);
+  assert.equal((await send('reader2', 'GET', `/api/chats/${state.chatId}/messages`)).statusCode, 404, 'still not a member');
+  assert.equal((await send('owner', 'GET', `/api/channels/${state.id}`)).json().bans.length, 1);
+  // someone who left on their own may come back
+  assert.equal((await send('reader', 'POST', `/api/channels/join/${inv.token}`)).statusCode, 200);
+  assert.equal((await send('reader', 'POST', `/api/channels/${state.id}/leave`)).statusCode, 204);
+  assert.equal((await send('reader', 'POST', `/api/channels/join/${inv.token}`)).statusCode, 200);
+  // only the owner lifts bans
+  assert.equal((await send('reader', 'DELETE', `/api/channels/${state.id}/bans/${ids.reader2}`)).statusCode, 403);
+  assert.equal((await send('owner', 'DELETE', `/api/channels/${state.id}/bans/${ids.reader2}`)).statusCode, 204);
+  assert.equal((await send('owner', 'DELETE', `/api/channels/${state.id}/bans/${ids.reader2}`)).statusCode, 404);
+  assert.equal((await send('reader2', 'POST', `/api/channels/join/${inv.token}`)).statusCode, 200);
+  await send('owner', 'DELETE', `/api/channels/${state.id}/members/${ids.reader2}`);
+  await send('owner', 'DELETE', `/api/channels/${state.id}/bans/${ids.reader2}`);
+  await send('reader', 'POST', `/api/channels/${state.id}/leave`);
+  await send('owner', 'DELETE', `/api/channels/${state.id}/invites/${inv.id}`);
+});
+
 test('rename and delete', async () => {
   const patched = await send('owner', 'PATCH', `/api/channels/${state.id}`, { title: 'Renamed' });
   assert.equal(patched.statusCode, 200);

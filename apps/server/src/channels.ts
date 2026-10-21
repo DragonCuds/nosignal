@@ -72,12 +72,13 @@ const getMine = async (channelId: string, userId: string): Promise<ChannelRow | 
 const memberCount = async (channelId: string): Promise<number> =>
   Number((await db.query<{ n: number }>('SELECT count(*) AS n FROM channel_members WHERE channel_id = $1', [channelId])).rows[0].n);
 
-const removeMember = async (channel: { id: string; chat_id: string }, userId: string): Promise<void> => {
+const removeMember = async (channel: { id: string; chat_id: string }, userId: string, bannedBy: string | null = null): Promise<void> => {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
     await client.query('DELETE FROM channel_members WHERE channel_id = $1 AND user_id = $2', [channel.id, userId]);
     await client.query('DELETE FROM chat_members WHERE chat_id = $1 AND user_id = $2', [channel.chat_id, userId]);
+    if (bannedBy) await client.query('INSERT OR REPLACE INTO channel_bans (channel_id, user_id, banned_by) VALUES ($1, $2, $3)', [channel.id, userId, bannedBy]);
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -143,6 +144,10 @@ export const registerChannelRoutes = async (app: FastifyInstance): Promise<void>
         'SELECT id, created_at FROM channel_invites WHERE channel_id = $1 AND revoked_at IS NULL ORDER BY id DESC', [channel.id]
       );
       body.invites = invites.rows.map((i) => ({ id: i.id, createdAt: i.created_at }));
+      const bans = await db.query<{ id: string; username: string; display_name: string }>(
+        'SELECT u.id, u.username, u.display_name FROM channel_bans b JOIN users u ON u.id = b.user_id WHERE b.channel_id = $1 ORDER BY b.banned_at DESC LIMIT 200', [channel.id]
+      );
+      body.bans = bans.rows.map((b) => ({ id: b.id, username: b.username, displayName: b.display_name }));
     }
     return body;
   });
@@ -237,6 +242,11 @@ export const registerChannelRoutes = async (app: FastifyInstance): Promise<void>
       await client.query('BEGIN');
       const already = await client.query('SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2', [channel.id, userId]);
       if (already.rowCount === 0) {
+        const banned = await client.query('SELECT 1 FROM channel_bans WHERE channel_id = $1 AND user_id = $2', [channel.id, userId]);
+        if (banned.rowCount === 1) {
+          await client.query('ROLLBACK');
+          return reply.code(403).send({ error: 'You were removed from this channel' });
+        }
         const count = await client.query<{ n: number }>('SELECT count(*) AS n FROM channel_members WHERE channel_id = $1', [channel.id]);
         if (Number(count.rows[0].n) >= MAX_MEMBERS) {
           await client.query('ROLLBACK');
@@ -300,7 +310,16 @@ export const registerChannelRoutes = async (app: FastifyInstance): Promise<void>
     if (target === channel.owner_id) return reply.code(409).send({ error: 'The owner cannot be removed' });
     const member = await db.query('SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2', [channel.id, target]);
     if (member.rowCount !== 1) return reply.code(404).send({ error: 'Member not found' });
-    await removeMember(channel, target);
+    await removeMember(channel, target, request.user!.id); // removed by the owner = banned from rejoining via invite links
     return reply.code(204).send();
+  });
+
+  app.delete<{ Params: { id: string; userId: string } }>('/api/channels/:id/bans/:userId', { preHandler: app.requireUser, config: { rateLimit: WRITE } }, async (request, reply) => {
+    const channel = await mine(request.params.id, request.user!.id, reply);
+    if (!channel) return;
+    if (channel.role !== 'owner') return reply.code(403).send({ error: 'Only the owner can lift a ban' });
+    const target = parseId(request.params.userId);
+    const lifted = target ? await db.query('DELETE FROM channel_bans WHERE channel_id = $1 AND user_id = $2', [channel.id, target]) : null;
+    return lifted?.rowCount === 1 ? reply.code(204).send() : reply.code(404).send({ error: 'Ban not found' });
   });
 };

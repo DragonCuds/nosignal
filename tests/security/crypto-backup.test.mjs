@@ -126,6 +126,12 @@ test('identity reset needs the right password, clears identity + envelopes + sto
   await db.query('INSERT INTO chat_members (chat_id, user_id) VALUES ($1, $2), ($1, $3)', [chat, me, other]);
   for (const [r, s] of [[me, me], [other, me]]) await db.query("INSERT INTO chat_key_envelopes (chat_id, recipient_id, sender_id, version, nonce, ciphertext) VALUES ($1, $2, $3, 1, $4, $5)", [chat, r, s, b64(16), b64(60)]);
 
+  const gchat = (await db.query('INSERT INTO chats DEFAULT VALUES RETURNING id')).rows[0].id;
+  await db.query('INSERT INTO chat_members (chat_id, user_id) VALUES ($1, $2), ($1, $3)', [gchat, me, other]);
+  const group = (await db.query('INSERT INTO groups (chat_id, title, created_by, key_version) VALUES ($1, $2, $3, 2) RETURNING id', [gchat, 'g', other])).rows[0].id;
+  const ochat = (await db.query('INSERT INTO chats DEFAULT VALUES RETURNING id')).rows[0].id;
+  await db.query('INSERT INTO chat_members (chat_id, user_id) VALUES ($1, $2)', [ochat, other]);
+  const otherGroup = (await db.query('INSERT INTO groups (chat_id, title, created_by, key_version) VALUES ($1, $2, $3, 1) RETURNING id', [ochat, 'o', other])).rows[0].id;
   assert.equal((await call(cookie, 'POST', '/api/crypto/identity/reset', {})).statusCode, 400);
   assert.equal((await call(cookie, 'POST', '/api/crypto/identity/reset', { password: 'wrong-password' })).statusCode, 403);
   assert.equal((await db.query('SELECT 1 FROM user_crypto_identities WHERE user_id = $1', [me])).rowCount, 1, 'wrong password changes nothing');
@@ -133,6 +139,8 @@ test('identity reset needs the right password, clears identity + envelopes + sto
   assert.equal((await db.query('SELECT 1 FROM user_crypto_identities WHERE user_id = $1', [me])).rowCount, 0);
   assert.equal((await db.query('SELECT 1 FROM user_crypto_identities WHERE user_id = $1', [other])).rowCount, 1, 'peer identity untouched');
   assert.equal((await db.query('SELECT 1 FROM chat_key_envelopes WHERE chat_id = $1', [chat])).rowCount, 0);
+  assert.equal((await db.query('SELECT pending_version FROM groups WHERE id = $1', [group])).rows[0].pending_version, 3, 'group needs a key rotation after the member reset');
+  assert.equal((await db.query('SELECT pending_version FROM groups WHERE id = $1', [otherGroup])).rows[0].pending_version, null, 'unrelated group untouched');
   const got = (await call(cookie, 'GET', '/api/crypto/backup')).json();
   assert.deepEqual([got.mode, got.backup], ['auto', null]);
   assert.equal((await call(cookie, 'PUT', '/api/crypto/identity', { publicKey: pub('c') })).statusCode, 200, 'new identity can be bound');

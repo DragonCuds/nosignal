@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,7 +13,7 @@ const serverRequire = createRequire(path.resolve(import.meta.dirname, '../apps/s
 const Fastify = serverRequire('fastify');
 const { WebSocketServer, WebSocket } = serverRequire('ws');
 
-const { ensureLocalCertificate, startServer } = await import('../apps/server/dist/tls.js');
+const { ensureLocalCertificate, regenerateLocalCa, startServer } = await import('../apps/server/dist/tls.js');
 
 const dirs = [];
 const tmp = () => { const d = mkdtempSync(path.join(os.tmpdir(), 'tel-tls-')); dirs.push(d); return d; };
@@ -65,15 +65,18 @@ test('second call keeps the cert; changed hosts or near-expiry reissue it (CA st
   assert.equal(new X509Certificate(readFileSync(first.files.crt)).serialNumber, serial);
 
   const moreHosts = ensureLocalCertificate(dataDir, ['localhost', '10.1.2.3']);
-  assert.ok(moreHosts.issued && !moreHosts.newCa);
+  // A name-constrained CA cannot vouch for a new IP: the CA is replaced (clients reinstall it).
+  assert.ok(moreHosts.issued && moreHosts.newCa);
   assert.match(new X509Certificate(readFileSync(first.files.crt)).subjectAltName, /10\.1\.2\.3/);
+  const caBefore2 = readFileSync(first.files.caCrt, 'utf8');
 
   // 10-day cert with the 30-day renewal window: must renew immediately.
   const short = ensureLocalCertificate(dataDir, ['localhost', '10.1.2.3'], { serverCertDays: 10, force: true });
   assert.ok(short.issued);
   const renewed = ensureLocalCertificate(dataDir, ['localhost', '10.1.2.3'], { renewBeforeDays: 30 });
   assert.ok(renewed.issued, 'cert with <30 days left is renewed');
-  assert.equal(readFileSync(first.files.caCrt, 'utf8'), caBefore);
+  assert.notEqual(caBefore2, caBefore);
+  assert.equal(readFileSync(first.files.caCrt, 'utf8'), caBefore2);
   const left = (Date.parse(new X509Certificate(readFileSync(first.files.crt)).validTo) - Date.now()) / 86_400_000;
   assert.ok(left > 300);
 });
@@ -156,4 +159,70 @@ test('files mode uses the given cert; off mode is plain HTTP without /ca.crt', a
   } finally {
     await off.close();
   }
+});
+
+test('new CA is name-constrained (critical): leaf validates for its hosts, a leaf for another domain does not', async () => {
+  const dataDir = tmp();
+  const { files } = ensureLocalCertificate(dataDir, ['example.test', '192.0.2.7', '::1']);
+  const caText = execFileSync('openssl', ['x509', '-in', files.caCrt, '-noout', '-text']).toString();
+  assert.match(caText, /X509v3 Name Constraints: critical/);
+  assert.match(caText, /DNS:example\.test/);
+  assert.match(caText, /IP:192\.0\.2\.7\/255\.255\.255\.255/);
+  assert.match(execFileSync('openssl', ['verify', '-CAfile', files.caCrt, files.crt]).toString(), /OK/);
+  for (const [purpose, name] of [['-verify_hostname', 'example.test'], ['-verify_ip', '192.0.2.7'], ['-verify_ip', '::1']]) {
+    assert.match(execFileSync('openssl', ['verify', '-CAfile', files.caCrt, '-purpose', 'sslserver', purpose, name, files.crt]).toString(), /OK/, `${purpose} ${name}`);
+  }
+  // Someone with the CA key mints a cert for google.com and for a foreign IP: both must fail.
+  const tmpDir = tmp();
+  for (const san of ['DNS:google.com', 'IP:8.8.8.8']) {
+    const key = path.join(tmpDir, 'k.pem'); const csr = path.join(tmpDir, 'c.csr'); const ext = path.join(tmpDir, 'e.cnf'); const crt = path.join(tmpDir, 'x.crt');
+    execFileSync('openssl', ['ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', key]);
+    execFileSync('openssl', ['req', '-new', '-key', key, '-subj', '/CN=evil', '-out', csr]);
+    execFileSync('sh', ['-c', `printf 'subjectAltName=${san}\\nextendedKeyUsage=serverAuth\\n' > ${ext}`]);
+    execFileSync('openssl', ['x509', '-req', '-in', csr, '-CA', files.caCrt, '-CAkey', files.caKey, '-CAcreateserial', '-CAserial', path.join(tmpDir, 's.srl'), '-days', '5', '-extfile', ext, '-out', crt], { stdio: 'ignore' });
+    assert.throws(() => execFileSync('openssl', ['verify', '-CAfile', files.caCrt, crt], { stdio: 'pipe' }), /permitted subtree violation|verification failed/i, san);
+  }
+});
+
+test('Node https validates the constrained CA for DNS and IP hosts, serves no CA key', async () => {
+  const dataDir = tmp();
+  const port = nextPort++;
+  const server = await startServer(makeApp(), { host: '127.0.0.1', port, dataDir, mode: 'auto', hosts: ['localhost', '127.0.0.1', '::1'] });
+  try {
+    const ca = readFileSync(path.join(dataDir, 'tls/ca.crt'));
+    assert.equal((await get(`https://127.0.0.1:${port}/api/health`, ca)).status, 200);
+    assert.equal((await get(`https://localhost:${port}/api/health`, ca)).status, 200);
+    for (const p of ['/ca.key', '/tls/ca.key', '/data/tls/ca.key', '/../tls/ca.key', '/ca.crt/../ca.key']) {
+      const res = await get(`https://127.0.0.1:${port}${p}`, ca);
+      assert.ok(!res.body.toString().includes('PRIVATE KEY'), p);
+      assert.notEqual(res.status, 200, p);
+    }
+    assert.equal(statSync(path.join(dataDir, 'tls/ca.key')).mode & 0o777, 0o600);
+    assert.equal(statSync(path.join(dataDir, 'tls')).mode & 0o777, 0o700);
+  } finally {
+    await server.close();
+  }
+});
+
+test('legacy CA without constraints is never replaced automatically; regenerateLocalCa is the opt-in', () => {
+  const dataDir = tmp();
+  const dir = path.join(dataDir, 'tls');
+  mkdirSync(dir, { recursive: true });
+  const key = path.join(dir, 'ca.key'); const crt = path.join(dir, 'ca.crt');
+  execFileSync('openssl', ['ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', key]);
+  execFileSync('openssl', ['req', '-x509', '-new', '-key', key, '-sha256', '-days', '3650', '-subj', '/CN=Legacy', '-addext', 'basicConstraints=critical,CA:TRUE,pathlen:0', '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-out', crt]);
+  const legacy = readFileSync(crt, 'utf8');
+  const first = ensureLocalCertificate(dataDir, ['example.test']);
+  assert.equal(first.newCa, false);
+  const more = ensureLocalCertificate(dataDir, ['example.test', '10.9.9.9']);
+  assert.equal(more.newCa, false);
+  assert.equal(readFileSync(crt, 'utf8'), legacy);
+  assert.match(execFileSync('openssl', ['verify', '-CAfile', crt, first.files.crt]).toString(), /OK/);
+
+  const out = regenerateLocalCa(dataDir, ['example.test', '10.9.9.9']);
+  assert.ok(out.backupDir && existsSync(path.join(out.backupDir, 'ca.key')));
+  assert.equal(readFileSync(path.join(out.backupDir, 'ca.crt'), 'utf8'), legacy);
+  assert.match(execFileSync('openssl', ['x509', '-in', crt, '-noout', '-text']).toString(), /Name Constraints: critical/);
+  assert.match(execFileSync('openssl', ['verify', '-CAfile', crt, out.files.crt]).toString(), /OK/);
+  assert.equal(statSync(key).mode & 0o777, 0o600);
 });

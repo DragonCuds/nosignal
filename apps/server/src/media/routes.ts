@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { requireUser } from '../auth.js';
 import { db } from '../db.js';
+import { cleanupEncryptedMedia } from './cleanup.js';
 import { importStickerPack } from './import-pack.js';
 import { getTelegramImport, publicJob, startTelegramImport, telegramImportEnabled } from './telegram-import.js';
 import { assertQuota, contentPath, ensureStorage, mediaDir, mediaUrl, moveContent, QuotaError, removeUnreferencedFiles, temporaryPath } from './storage.js';
@@ -23,7 +24,26 @@ const MAX_GENERATED_BYTES = 20 * 1024 * 1024;
 const MAX_ENCRYPTED_MEDIA_BYTES = 25 * 1024 * 1024 + 16;
 const MEDIA_READ_RATE_LIMIT = { max: 600, timeWindow: '1 minute' } as const;
 const MEDIA_WRITE_RATE_LIMIT = { max: 60, timeWindow: '1 minute' } as const;
-const MEDIA_UPLOAD_RATE_LIMIT = { max: 10, timeWindow: '1 hour' } as const;
+// Per authenticated user (never per IP: CGNAT/proxy users would share one bucket), evaluated after requireUser.
+const userKey = (request: FastifyRequest): string => request.user ? `u:${request.user.id}` : `ip:${request.ip}`;
+const tooMany = (_request: FastifyRequest, context: { after: string; ttl: number }) =>
+  Object.assign(new Error(`Too many uploads. Try again in ${Math.max(1, Math.ceil(context.ttl / 1000))} s.`), {
+    statusCode: 429, code: 'RATE_LIMITED', retryAfter: Math.max(1, Math.ceil(context.ttl / 1000))
+  });
+const MEDIA_UPLOAD_RATE_LIMIT = { max: 30, timeWindow: '1 hour', hook: 'preHandler', keyGenerator: userKey, errorResponseBuilder: tooMany } as const;
+// Every sticker/GIF/image send is one encrypted upload: small blobs get a generous bucket, big ones (video/files) a stricter one.
+const SMALL_MEDIA_BYTES = 2 * 1024 * 1024;
+const isBigUpload = (request: FastifyRequest): boolean => {
+  const length = Number(request.headers['content-length']);
+  return !Number.isFinite(length) || length > SMALL_MEDIA_BYTES;
+};
+const ENCRYPTED_MEDIA_RATE_LIMIT = {
+  max: (request: FastifyRequest) => isBigUpload(request) ? 20 : 120,
+  timeWindow: '10 minutes',
+  hook: 'preHandler',
+  keyGenerator: (request: FastifyRequest) => `${userKey(request)}:${isBigUpload(request) ? 'big' : 'small'}`,
+  errorResponseBuilder: tooMany
+} as const;
 const mimeTypes: Record<string, string> = { '.tgs': 'application/gzip', '.webm': 'video/webm', '.webp': 'image/webp', '.mp4': 'video/mp4' };
 
 type PackRow = { id: string; slug: string; title: string; thumb_path: string | null };
@@ -93,11 +113,17 @@ const parseTags = (value: unknown): string[] => typeof value === 'string'
 
 export const registerMediaRoutes = async (app: FastifyInstance): Promise<void> => {
   await ensureStorage();
+  // Hourly (and once shortly after start) removal of encrypted media nobody references; see cleanup.ts.
+  const sweep = (): void => { cleanupEncryptedMedia().catch((error: unknown) => app.log.warn({ err: error }, 'encrypted media cleanup failed')); };
+  const sweepTimer = setInterval(sweep, 3_600_000);
+  const sweepFirst = setTimeout(sweep, 120_000);
+  sweepTimer.unref(); sweepFirst.unref();
+  app.addHook('onClose', async () => { clearInterval(sweepTimer); clearTimeout(sweepFirst); });
   await app.register(fastifyMultipart, { limits: { files: 1, fileSize: MAX_PACK_BYTES, fieldSize: 2_048, fields: 4, parts: 5 } });
 
   app.post<{ Params: { id: string } }>('/api/chats/:id/encrypted-media', {
     preHandler: requireUser,
-    config: { rateLimit: MEDIA_UPLOAD_RATE_LIMIT }
+    config: { rateLimit: ENCRYPTED_MEDIA_RATE_LIMIT }
   }, async (request, reply) => {
     const chatId = parseId(request.params.id);
     if (!chatId) return reply.code(400).send({ error: 'Invalid chat id' });

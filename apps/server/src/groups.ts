@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { db } from './db.js';
+import { notifyChatNew } from './realtime.js';
 
 // End-to-end encrypted groups (gr-1). See docs/GROUPS.md. A group is an ordinary 'direct' chat row linked in
 // `groups`; members are in chat_members (messages/sync/realtime/media unchanged) and group_members (role).
@@ -147,6 +148,7 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
         await client.query('INSERT INTO group_key_envelopes (group_id, version, user_id, wrapped, wrapped_by) VALUES ($1, 1, $2, $3, $4)', [group.rows[0].id, envelope.userId, envelope.wrapped, userId]);
       }
       await client.query('COMMIT');
+      notifyChatNew(app, all.filter((id) => id !== userId), chat.rows[0].id);
       return reply.code(201).send({ id: group.rows[0].id, chatId: chat.rows[0].id });
     } catch (error) {
       await client.query('ROLLBACK').catch(() => undefined);
@@ -250,6 +252,7 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
     } finally {
       client.release();
     }
+    notifyChatNew(app, [target], group.chat_id);
     return reply.code(204).send();
   });
 

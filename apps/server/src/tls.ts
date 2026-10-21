@@ -114,7 +114,48 @@ const writeSecret = (file: string, content: string | Buffer): void => {
   chmodSync(file, 0o600);
 };
 
-const makeCa = (f: TlsFiles): void => {
+/** X.509 nameConstraints value limiting a CA to exactly these hosts (DNS name + subdomains, single IPs). */
+const nameConstraintsFor = (hosts: string[]): string => {
+  const parts = hosts.map((h) => {
+    const v = isIP(h);
+    if (v === 4) return `permitted;IP:${h}/255.255.255.255`;
+    if (v === 6) return `permitted;IP:${h}/ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff`;
+    return `permitted;DNS:${h}`;
+  });
+  return `nameConstraints=critical,${parts.join(',')}`;
+};
+
+/** null = CA has no name constraints (legacy CA); otherwise the permitted DNS names and IPs. */
+const certText = (ca: X509Certificate): string =>
+  execFileSync('openssl', ['x509', '-noout', '-text'], { input: ca.toString(), stdio: ['pipe', 'pipe', 'ignore'] }).toString();
+
+const caConstraints = (ca: X509Certificate): { dns: string[]; ips: string[] } | null => {
+  let text: string;
+  try { text = certText(ca); } catch { return null; }
+  const start = text.indexOf('Name Constraints');
+  if (start < 0) return null;
+  const block = text.slice(start);
+  const permitted = block.split(/Excluded:/u)[0] ?? '';
+  const dns = [...permitted.matchAll(/DNS:([^\s,]+)/gu)].map((m) => (m[1] ?? '').toLowerCase().replace(/^\./u, ''));
+  const ips = [...permitted.matchAll(/IP:([0-9a-fA-F:.]+)\//gu)].map((m) => { const ip = m[1] ?? ''; return isIP(ip) === 6 ? canonicalV6(ip) : ip; });
+  return { dns, ips };
+};
+
+/** Does the CA's constraint list allow every host? (A CA without constraints allows everything.) */
+const caPermits = (ca: X509Certificate, hosts: string[]): boolean => {
+  const c = caConstraints(ca);
+  if (!c) return true;
+  return hosts.every((h) => {
+    if (isIP(h)) return c.ips.includes(isIP(h) === 6 ? canonicalV6(h) : h);
+    const name = h.toLowerCase();
+    return c.dns.some((d) => name === d || name.endsWith(`.${d}`));
+  });
+};
+
+/** Create (or replace) ca.key with mode 0600 from the first byte. */
+const makeCa = (f: TlsFiles, hosts: string[]): void => {
+  writeFileSync(f.caKey, '', { mode: 0o600 });
+  chmodSync(f.caKey, 0o600);
   openssl(['ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', f.caKey]);
   chmodSync(f.caKey, 0o600);
   openssl([
@@ -123,6 +164,7 @@ const makeCa = (f: TlsFiles): void => {
     '-addext', 'basicConstraints=critical,CA:TRUE,pathlen:0',
     '-addext', 'keyUsage=critical,keyCertSign,cRLSign',
     '-addext', 'subjectKeyIdentifier=hash',
+    '-addext', nameConstraintsFor(hosts),
     '-out', f.caCrt
   ]);
 };
@@ -169,13 +211,17 @@ export const ensureLocalCertificate = (
   const renewBefore = options.renewBeforeDays ?? 30;
   const names = normalizeHosts(hosts);
   mkdirSync(f.dir, { recursive: true, mode: 0o700 });
+  chmodSync(f.dir, 0o700);
+  if (existsSync(f.caKey)) chmodSync(f.caKey, 0o600);
   let issued = false;
   let newCa = false;
 
   const ca = existsSync(f.caKey) ? readCert(f.caCrt) : null;
   // A CA with < 60 days left is replaced (clients must then reinstall it; rare, 10-year CA).
-  if (!ca || Date.parse(ca.validTo) - Date.now() < Math.max(60, renewBefore * 2) * DAY_MS) {
-    makeCa(f);
+  // A name-constrained CA that no longer covers the configured hosts must be replaced too (a leaf would not validate).
+  // A legacy CA without constraints is never replaced automatically: see regenerateLocalCa().
+  if (!ca || Date.parse(ca.validTo) - Date.now() < Math.max(60, renewBefore * 2) * DAY_MS || !caPermits(ca, names)) {
+    makeCa(f, names);
     newCa = true;
   }
   const current = !newCa && existsSync(f.key) ? readCert(f.crt) : null;
@@ -184,6 +230,27 @@ export const ensureLocalCertificate = (
     issued = true;
   }
   return { files: f, issued, newCa };
+};
+
+/**
+ * Opt-in: replace the local CA (and server cert) with a new name-constrained one limited to `hosts`.
+ * The old tls files are kept in `<dataDir>/tls/backup-<timestamp>/`. Every phone must install /ca.crt again.
+ */
+export const regenerateLocalCa = (dataDir: string, hosts: string[], options: { serverCertDays?: number } = {}): { backupDir: string | null; files: TlsFiles } => {
+  const f = filesIn(dataDir);
+  const names = normalizeHosts(hosts);
+  mkdirSync(f.dir, { recursive: true, mode: 0o700 });
+  chmodSync(f.dir, 0o700);
+  let backupDir: string | null = null;
+  const old = [f.caKey, f.caCrt, f.key, f.crt].filter((file) => existsSync(file));
+  if (old.length) {
+    backupDir = join(f.dir, `backup-${new Date().toISOString().replace(/[:.]/gu, '-')}`);
+    mkdirSync(backupDir, { mode: 0o700 });
+    for (const file of old) renameSync(file, join(backupDir, file.slice(f.dir.length + 1)));
+  }
+  makeCa(f, names);
+  makeServerCert(f, names, options.serverCertDays ?? 365);
+  return { backupDir, files: f };
 };
 
 const helpPage = (caPath: string): string => `<!doctype html>

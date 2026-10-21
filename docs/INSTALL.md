@@ -20,6 +20,14 @@ sudo ./install.sh --ip-only --admin myname            # or: --domain tel.example
 The file contains the built app, production `node_modules` with prebuilt native modules, Node.js 24, static `ffmpeg`/`ffprobe` and the installer.
 The installer touches **no system package** and calls no network: no apt, npm, git, curl, nginx or certbot. It needs only root, systemd and `openssl` (present on standard Ubuntu/Debian).
 The app serves HTTPS itself (`TLS_MODE=auto`: a private CA and server certificate created under the data folder). Each phone/PC must trust that CA once: open `https://<server>:3050/ca-help`.
+
+New CAs are name-constrained: they are only valid for the names and IPs in `TLS_HOSTS`, so a leaked `tls/ca.key` cannot be used to impersonate other websites. If you add a new host/IP to `TLS_HOSTS` later, a new CA is created and phones must install `/ca.crt` again. CAs created by older versions have no such limit and keep working; to upgrade one (opt-in, phones must re-install `/ca.crt`):
+
+```
+node scripts/regenerate-ca.mjs --yes --data-dir "$DATA_DIR" --hosts "$TLS_HOSTS"   # then restart the service
+```
+
+The old files are kept in `tls/backup-<time>/`; delete that folder once every device has the new CA.
 To use a certificate you already own: `--cert fullchain.pem --key privkey.pem` (with `--domain`).
 Default port is 3050 (no root-only port). For 443 either install with `--port 443` (the unit gets `CAP_NET_BIND_SERVICE`) or redirect: `iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-ports 3050`.
 `/usr/bin/ffmpeg` and `/usr/bin/ffprobe` are linked to the bundled ones only if the system has none (the app calls those paths).

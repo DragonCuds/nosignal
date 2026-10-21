@@ -4,6 +4,7 @@ import { parseEncryptedMessageV2, type EncryptedMessageV2 } from './encrypted-me
 import { recordEvent, registerSync } from './sync.js';
 import { ensureCanPost, registerChannelRoutes } from './channels.js';
 import { groupMessageGate, registerGroupRoutes } from './groups.js';
+import { notifyChatNew } from './realtime.js';
 
 const MESSAGE_KINDS = ['text', 'sticker', 'gif', 'photo', 'video', 'voice', 'file'] as const;
 // Kinds whose bytes may live in an E2EE attachment (PUT /api/chats/:chatId/attachments/:id).
@@ -308,6 +309,7 @@ export const registerChatRoutes = async (app: FastifyInstance): Promise<void> =>
         [chat.rows[0].id, request.user!.id, peerId]
       );
       await client.query('COMMIT');
+      notifyChatNew(app, [peerId], chat.rows[0].id);
       return reply.code(201).send({ id: chat.rows[0].id, created: true });
     } catch (error) {
       await client.query('ROLLBACK');
