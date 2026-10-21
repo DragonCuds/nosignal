@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
@@ -35,6 +35,23 @@ const makeApp = () => {
   return app;
 };
 
+const signLeaf = (files, san) => {
+  const dir = tmp();
+  const key = path.join(dir, 'leaf.key');
+  const csr = path.join(dir, 'leaf.csr');
+  const ext = path.join(dir, 'leaf.cnf');
+  const crt = path.join(dir, 'leaf.crt');
+  writeFileSync(ext, `subjectAltName=${san}\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n`);
+  execFileSync('openssl', ['ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', key]);
+  execFileSync('openssl', ['req', '-new', '-key', key, '-subj', '/CN=Test leaf', '-out', csr]);
+  execFileSync('openssl', ['x509', '-req', '-in', csr, '-CA', files.caCrt, '-CAkey', files.caKey,
+    '-CAcreateserial', '-CAserial', path.join(dir, 'serial'), '-days', '5', '-extfile', ext, '-out', crt], { stdio: 'ignore' });
+  return crt;
+};
+
+const verifyLeaf = (files, crt) => execFileSync('openssl',
+  ['verify', '-purpose', 'sslserver', '-CAfile', files.caCrt, crt], { stdio: 'pipe' }).toString();
+
 let nextPort = 4110;
 
 test('ensureLocalCertificate: EC P-256 CA + server cert with SAN, verifies, keys are 0600', () => {
@@ -54,7 +71,7 @@ test('ensureLocalCertificate: EC P-256 CA + server cert with SAN, verifies, keys
   assert.equal(statSync(files.caKey).mode & 0o777, 0o600);
 });
 
-test('second call keeps the cert; changed hosts or near-expiry reissue it (CA stays)', () => {
+test('second call keeps the cert; changed hosts require planned CA replacement; leaf renewal keeps CA', () => {
   const dataDir = tmp();
   const first = ensureLocalCertificate(dataDir, ['localhost']);
   const serial = new X509Certificate(readFileSync(first.files.crt)).serialNumber;
@@ -64,9 +81,9 @@ test('second call keeps the cert; changed hosts or near-expiry reissue it (CA st
   assert.equal(again.issued, false);
   assert.equal(new X509Certificate(readFileSync(first.files.crt)).serialNumber, serial);
 
-  const moreHosts = ensureLocalCertificate(dataDir, ['localhost', '10.1.2.3']);
-  // A name-constrained CA cannot vouch for a new IP: the CA is replaced (clients reinstall it).
-  assert.ok(moreHosts.issued && moreHosts.newCa);
+  assert.throws(() => ensureLocalCertificate(dataDir, ['localhost', '10.1.2.3']), /planned replacement/);
+  assert.equal(readFileSync(first.files.caCrt, 'utf8'), caBefore);
+  regenerateLocalCa(dataDir, ['localhost', '10.1.2.3']);
   assert.match(new X509Certificate(readFileSync(first.files.crt)).subjectAltName, /10\.1\.2\.3/);
   const caBefore2 = readFileSync(first.files.caCrt, 'utf8');
 
@@ -182,6 +199,52 @@ test('new CA is name-constrained (critical): leaf validates for its hosts, a lea
     execFileSync('openssl', ['x509', '-req', '-in', csr, '-CA', files.caCrt, '-CAkey', files.caKey, '-CAcreateserial', '-CAserial', path.join(tmpDir, 's.srl'), '-days', '5', '-extfile', ext, '-out', crt], { stdio: 'ignore' });
     assert.throws(() => execFileSync('openssl', ['verify', '-CAfile', files.caCrt, crt], { stdio: 'pipe' }), /permitted subtree violation|verification failed/i, san);
   }
+});
+
+test('CA constraints reject absent name types, DNS children and mixed SANs', () => {
+  for (const [hosts, accepted, rejected] of [
+    [['192.0.2.7'], ['IP:192.0.2.7'], ['DNS:other.test', 'IP:8.8.8.8', 'IP:192.0.2.7,DNS:other.test']],
+    [['example.test'], ['DNS:example.test'], ['DNS:child.example.test', 'IP:8.8.8.8', 'IP:::1', 'DNS:example.test,IP:8.8.8.8']],
+    [['example.test', '192.0.2.7'], ['DNS:example.test', 'IP:192.0.2.7'], ['DNS:child.example.test', 'DNS:other.test', 'IP:8.8.8.8', 'IP:::1', 'DNS:example.test,IP:8.8.8.8']]
+  ]) {
+    const { files } = ensureLocalCertificate(tmp(), hosts);
+    for (const san of accepted) assert.match(verifyLeaf(files, signLeaf(files, san)), /OK/, `${hosts}: ${san}`);
+    for (const san of rejected) {
+      assert.throws(() => verifyLeaf(files, signLeaf(files, san)),
+        /excluded subtree violation|permitted subtree violation|verification failed/i, `${hosts}: ${san}`);
+    }
+  }
+});
+
+test('overlapping DNS names fail before replacing a CA', () => {
+  const dataDir = tmp();
+  const first = ensureLocalCertificate(dataDir, ['example.test']);
+  const oldCa = readFileSync(first.files.caCrt);
+  const oldKey = readFileSync(first.files.caKey);
+  assert.throws(() => regenerateLocalCa(dataDir, ['example.test', 'child.example.test']), /cannot contain both/);
+  assert.deepEqual(readFileSync(first.files.caCrt), oldCa);
+  assert.deepEqual(readFileSync(first.files.caKey), oldKey);
+});
+
+test('an offline CA key is unnecessary for serving a fresh leaf and fails closed on renewal', () => {
+  const dataDir = tmp();
+  const first = ensureLocalCertificate(dataDir, ['192.0.2.7']);
+  const oldCa = readFileSync(first.files.caCrt);
+  const oldLeaf = readFileSync(first.files.crt);
+  const owner = statSync(first.files.key);
+  const offlineKey = path.join(tmp(), 'ca.key');
+  renameSync(first.files.caKey, offlineKey);
+  assert.equal(ensureLocalCertificate(dataDir, ['192.0.2.7']).newCa, false);
+  assert.throws(() => ensureLocalCertificate(dataDir, ['192.0.2.7'], { force: true }), /CA key is offline/);
+  assert.deepEqual(readFileSync(first.files.caCrt), oldCa);
+  assert.deepEqual(readFileSync(first.files.crt), oldLeaf);
+  renameSync(offlineKey, first.files.caKey);
+  assert.match(execFileSync(process.execPath, ['scripts/renew-local-cert.mjs', '--data-dir', dataDir,
+    '--hosts', '192.0.2.7']).toString(), /Server certificate renewed/);
+  assert.notDeepEqual(readFileSync(first.files.crt), oldLeaf);
+  assert.deepEqual(readFileSync(first.files.caCrt), oldCa);
+  assert.equal(statSync(first.files.key).uid, owner.uid);
+  assert.equal(statSync(first.files.key).gid, owner.gid);
 });
 
 test('Node https validates the constrained CA for DNS and IP hosts, serves no CA key', async () => {

@@ -776,8 +776,9 @@ SIGNUP_NOW=off; [[ $(env_get OPEN_REGISTRATION) =~ ^(1|true)$ ]] && SIGNUP_NOW=o
     printf '   Open %s/ca-help for pictures. Download the CA from %s/ca.crt then:\n' "$ORIGIN" "$ORIGIN"
     printf '   iPhone : open ca.crt in Safari > Allow > Settings > Profile Downloaded > Install; then Settings > General > About > Certificate Trust Settings > enable it.\n'
     printf '   Android: Settings > Security > Encryption & credentials > Install a certificate > CA certificate > pick ca.crt.\n'
-    printf '   Desktop: import ca.crt as a trusted root (Windows: certmgr.msc Trusted Root; macOS: Keychain > Always Trust; Linux: update-ca-certificates).\n'
+    printf '   Desktop: verify the CA fingerprint with the operator first; importing a root changes device trust. Prefer app-scoped trust if supported.\n'
     printf '   آیفون: فایل ca.crt را در Safari باز و نصب کنید، سپس در Settings > General > About > Certificate Trust Settings فعالش کنید. اندروید: تنظیمات > امنیت > نصب گواهی > CA.\n'
+    printf '   Move DATA_DIR/tls/ca.key to offline storage after issuance; see DEPLOYMENT.md for planned leaf renewal.\n'
   fi
   if $SELF_TLS && (( PORT != 443 )); then
     printf '\n Port %s is used (no root-only port). For https://host without a port: sudo iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-ports %s\n   (or reinstall with --port 443, which grants the service CAP_NET_BIND_SERVICE).\n' "$PORT" "$PORT"

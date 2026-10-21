@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { X509Certificate } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { randomBytes, X509Certificate } from 'node:crypto';
+import { chownSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import https from 'node:https';
 import type { AddressInfo } from 'node:net';
@@ -58,7 +58,8 @@ const HOST_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-
 
 const normalizeHosts = (hosts: string[] | undefined): string[] => {
   const list = hosts?.map((h) => h.trim().replace(/^\[|\]$/gu, '')).filter(Boolean);
-  const result = [...new Set(list?.length ? list : ['localhost', '127.0.0.1', '::1'])];
+  const result = [...new Set((list?.length ? list : ['localhost', '127.0.0.1', '::1'])
+    .map((h) => isIP(h) ? h : h.toLowerCase()))];
   for (const host of result) {
     if (!isIP(host) && !HOST_RE.test(host)) throw new Error(`Invalid TLS host name: ${host}`);
   }
@@ -114,14 +115,28 @@ const writeSecret = (file: string, content: string | Buffer): void => {
   chmodSync(file, 0o600);
 };
 
-/** X.509 nameConstraints value limiting a CA to exactly these hosts (DNS name + subdomains, single IPs). */
+/** Constrain the DNS and IP identities used for HTTPS in the local CA. */
 const nameConstraintsFor = (hosts: string[]): string => {
+  const dnsHosts = hosts.filter((h) => !isIP(h));
+  for (const host of dnsHosts) {
+    if (dnsHosts.some((other) => other !== host && other.endsWith(`.${host}`))) {
+      throw new Error(`TLS_HOSTS cannot contain both ${host} and a subdomain: X.509 cannot constrain that list to exact DNS hosts`);
+    }
+  }
   const parts = hosts.map((h) => {
     const v = isIP(h);
     if (v === 4) return `permitted;IP:${h}/255.255.255.255`;
     if (v === 6) return `permitted;IP:${h}/ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff`;
     return `permitted;DNS:${h}`;
   });
+  // A permitted subtree only restricts names of its own type. A DNS permit
+  // also includes subdomains, so exclude those for exact configured hosts.
+  for (const host of dnsHosts) parts.push(`excluded;DNS:.${host}`);
+  // An empty DNS subtree cannot be expressed by OpenSSL. For IP-only CAs,
+  // permit one unpredictable name under the reserved .invalid TLD instead.
+  if (!dnsHosts.length) parts.push(`permitted;DNS:${randomBytes(16).toString('hex')}.invalid`);
+  if (!hosts.some((h) => isIP(h) === 4)) parts.push('excluded;IP:0.0.0.0/0.0.0.0');
+  if (!hosts.some((h) => isIP(h) === 6)) parts.push('excluded;IP:::/::');
   return `nameConstraints=critical,${parts.join(',')}`;
 };
 
@@ -148,12 +163,14 @@ const caPermits = (ca: X509Certificate, hosts: string[]): boolean => {
   return hosts.every((h) => {
     if (isIP(h)) return c.ips.includes(isIP(h) === 6 ? canonicalV6(h) : h);
     const name = h.toLowerCase();
-    return c.dns.some((d) => name === d || name.endsWith(`.${d}`));
+    // New CAs exclude subdomains; treat an added subdomain as a host change.
+    return c.dns.includes(name);
   });
 };
 
 /** Create (or replace) ca.key with mode 0600 from the first byte. */
 const makeCa = (f: TlsFiles, hosts: string[]): void => {
+  const constraints = nameConstraintsFor(hosts);
   writeFileSync(f.caKey, '', { mode: 0o600 });
   chmodSync(f.caKey, 0o600);
   openssl(['ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', f.caKey]);
@@ -164,12 +181,12 @@ const makeCa = (f: TlsFiles, hosts: string[]): void => {
     '-addext', 'basicConstraints=critical,CA:TRUE,pathlen:0',
     '-addext', 'keyUsage=critical,keyCertSign,cRLSign',
     '-addext', 'subjectKeyIdentifier=hash',
-    '-addext', nameConstraintsFor(hosts),
+    '-addext', constraints,
     '-out', f.caCrt
   ]);
 };
 
-const makeServerCert = (f: TlsFiles, hosts: string[], days: number): void => {
+const makeServerCert = (f: TlsFiles, hosts: string[], days: number, previousOwner = existsSync(f.key) ? statSync(f.key) : null): void => {
   const tmp = mkdtempSync(join(f.dir, '.issue-'));
   try {
     const key = join(tmp, 'server.key');
@@ -193,6 +210,14 @@ const makeServerCert = (f: TlsFiles, hosts: string[], days: number): void => {
       '-CAserial', join(tmp, 'ca.srl'), '-sha256', '-days', String(days), '-extfile', ext, '-out', crt
     ]);
     chmodSync(key, 0o600);
+    // Offline renewal is run by an operator while the web service is stopped.
+    // Keep the leaf key readable by its original service account afterwards.
+    if (previousOwner) {
+      const generated = statSync(key);
+      if (generated.uid !== previousOwner.uid || generated.gid !== previousOwner.gid) {
+        chownSync(key, previousOwner.uid, previousOwner.gid);
+      }
+    }
     // Swap in key first, then cert; a reader that sees a mismatched pair just fails once and retries.
     renameSync(key, f.key);
     renameSync(crt, f.crt);
@@ -216,16 +241,22 @@ export const ensureLocalCertificate = (
   let issued = false;
   let newCa = false;
 
-  const ca = existsSync(f.caKey) ? readCert(f.caCrt) : null;
-  // A CA with < 60 days left is replaced (clients must then reinstall it; rare, 10-year CA).
-  // A name-constrained CA that no longer covers the configured hosts must be replaced too (a leaf would not validate).
-  // A legacy CA without constraints is never replaced automatically: see regenerateLocalCa().
-  if (!ca || Date.parse(ca.validTo) - Date.now() < Math.max(60, renewBefore * 2) * DAY_MS || !caPermits(ca, names)) {
+  const ca = readCert(f.caCrt);
+  const hasCaKey = existsSync(f.caKey);
+  // Replacing a trusted CA disconnects clients until they install the new
+  // root. Never do that as a side effect of startup or certificate renewal.
+  if (ca && (Date.parse(ca.validTo) - Date.now() < Math.max(60, renewBefore * 2) * DAY_MS || !caPermits(ca, names))) {
+    throw new Error('Local CA needs planned replacement for these hosts or its expiry; use regenerateLocalCa after migrating client trust');
+  }
+  if (!ca) {
+    if (hasCaKey) throw new Error('Local CA certificate is missing while its key exists; restore ca.crt from backup');
+    if (existsSync(f.crt) || existsSync(f.key)) throw new Error('Local CA certificate is missing; restore ca.crt from backup');
     makeCa(f, names);
     newCa = true;
   }
   const current = !newCa && existsSync(f.key) ? readCert(f.crt) : null;
   if (options.force || !current || !certIsFresh(current, names, renewBefore)) {
+    if (!existsSync(f.caKey)) throw new Error('Local CA key is offline; restore it under DATA_DIR/tls/ca.key for planned server certificate renewal');
     makeServerCert(f, names, options.serverCertDays ?? 365);
     issued = true;
   }
@@ -239,9 +270,11 @@ export const ensureLocalCertificate = (
 export const regenerateLocalCa = (dataDir: string, hosts: string[], options: { serverCertDays?: number } = {}): { backupDir: string | null; files: TlsFiles } => {
   const f = filesIn(dataDir);
   const names = normalizeHosts(hosts);
+  nameConstraintsFor(names); // Validate before moving the current CA into the backup.
   mkdirSync(f.dir, { recursive: true, mode: 0o700 });
   chmodSync(f.dir, 0o700);
   let backupDir: string | null = null;
+  const previousLeafOwner = existsSync(f.key) ? statSync(f.key) : null;
   const old = [f.caKey, f.caCrt, f.key, f.crt].filter((file) => existsSync(file));
   if (old.length) {
     backupDir = join(f.dir, `backup-${new Date().toISOString().replace(/[:.]/gu, '-')}`);
@@ -249,7 +282,7 @@ export const regenerateLocalCa = (dataDir: string, hosts: string[], options: { s
     for (const file of old) renameSync(file, join(backupDir, file.slice(f.dir.length + 1)));
   }
   makeCa(f, names);
-  makeServerCert(f, names, options.serverCertDays ?? 365);
+  makeServerCert(f, names, options.serverCertDays ?? 365, previousLeafOwner);
   return { backupDir, files: f };
 };
 
@@ -293,7 +326,7 @@ ol{padding-inline-start:1.4em}
 <h2>کامپیوتر</h2>
 <p>فایل را باز کنید و در «Trusted Root Certification Authorities» (ویندوز) یا Keychain (مک) اضافه کنید.</p>
 
-<p class="note">این گواهی فقط برای همین سرور است. فایل را از هیچ منبع دیگری نصب نکنید.</p>
+<p class="note">نصب CA به این مرجع در دستگاه شما اعتماد می‌دهد. آن را فقط از مدیر مورد اعتماد بگیرید، اثر انگشت آن را جداگانه تأیید کنید و بعد از پایان استفاده حذف کنید. دامنهٔ این اعتماد در مرورگرها و سیستم‌عامل‌ها ممکن است متفاوت باشد.</p>
 </main>
 </body>
 </html>

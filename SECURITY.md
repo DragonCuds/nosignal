@@ -16,6 +16,7 @@ Security fixes target the current main-branch revision on Node.js 24 with suppor
 ## Operator baseline
 
 - Terminate TLS at nginx (or use `TLS_MODE`) and keep Node bound to loopback unless clients connect directly.
+- For public DNS names, use a publicly trusted certificate. In `TLS_MODE=auto`, treat `ca.key` as a signing authority: store it offline after initial issuance and restore it only during planned leaf renewal. See [DEPLOYMENT.md](DEPLOYMENT.md#local-ca-tls_modeauto). X.509 name constraints do not guarantee that every client limits a manually trusted root identically.
 - Run the service as an unprivileged account with a read-only application tree and a single writable `DATA_DIR`.
 - Keep `.env` outside the repository where possible, mode `0640` or stricter, and readable only by root and the service group. Never commit secrets.
 - Use a unique random session secret. Rotate any value that may have been disclosed. Changing `SESSION_SECRET` invalidates all sessions.
