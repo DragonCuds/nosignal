@@ -45,7 +45,7 @@ The old single-blob format (`encryptedMedia` v1, `/api/encrypted-media/:id`) sta
 
 ## Upload
 - **tus** resumable protocol (`@tus/server` on Fastify under `/api/uploads`, `tus-js-client` in the browser), uploading **ciphertext**.
-- Create request needs: valid session, trusted Origin, chat membership, declared size ≤ `MAX_ATTACHMENT_MB` (default 100), user quota not exceeded (default 2 GB of *live* attachments).
+- Create request needs: valid session, trusted Origin, chat membership, declared size ≤ `MAX_ATTACHMENT_MB` (default 100), and available quota. `USER_QUOTA_MB` (default 2048) covers both live chat attachments and encrypted chat media. In-flight one-shot uploads and resumable attachment totals are reserved before reading file data. A service-wide cap and free-disk threshold also apply.
 - Upload id is random and unguessable; nothing in the filename or metadata is plaintext (`Upload-Metadata` carries only the chat id).
 - The browser encrypts chunk by chunk while uploading (stream), so memory stays flat.
 - An upload not referenced by any message within 1 hour is deleted (hourly cleanup job). The sender can still view their own fresh upload during that hour (as v1 does).
@@ -68,6 +68,8 @@ The old single-blob format (`encryptedMedia` v1, `/api/encrypted-media/:id`) sta
 |---|---|
 | `MAX_ATTACHMENT_MB` | 100 |
 | `USER_QUOTA_MB` | 2048 |
+| `SERVER_STORAGE_QUOTA_MB` | 20480 |
+| `MIN_FREE_STORAGE_MB` | 512 |
 | `ATTACHMENT_RETENTION_DAYS` | off |
 | Voice max length | 10 min (client) |
 | Chunk size | 256 KiB (fixed in v2) |

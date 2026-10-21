@@ -1,4 +1,4 @@
-// Orphan cleanup of encrypted chat media: only unreferenced + old rows/files go; everything else stays.
+// Orphan cleanup of encrypted chat media: old files with no live reference go.
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, utimes, writeFile } from 'node:fs/promises';
@@ -48,16 +48,18 @@ before(async () => {
 });
 after(async () => { await db.end(); await rm(dataDir, { recursive: true, force: true }); });
 
-test('removes only old unreferenced rows+files; keeps fresh, referenced and soft-deleted-message media', async () => {
+test('removes old unreferenced and deleted-message media; keeps fresh and live media', async () => {
   const orphanOld = await addMedia(old);
   const orphanFresh = await addMedia(fresh);
   const used = await addMedia(old, { message: true });
   const usedDeleted = await addMedia(old, { message: true, deleted: true });
   const result = await cleanupEncryptedMedia();
-  assert.equal(result.rows, 1);
+  assert.equal(result.rows, 2);
   assert.equal(existsSync(file(orphanOld)), false);
   assert.equal((await db.query('SELECT 1 FROM encrypted_chat_media WHERE id = $1', [orphanOld])).rowCount, 0);
-  for (const id of [orphanFresh, used, usedDeleted]) {
+  assert.equal(existsSync(file(usedDeleted)), false);
+  assert.equal((await db.query('SELECT encrypted_media_id FROM messages WHERE encrypted_media_id = $1', [usedDeleted])).rowCount, 0);
+  for (const id of [orphanFresh, used]) {
     assert.equal(existsSync(file(id)), true, id);
     assert.equal((await db.query('SELECT 1 FROM encrypted_chat_media WHERE id = $1', [id])).rowCount, 1);
   }

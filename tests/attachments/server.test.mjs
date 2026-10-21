@@ -62,7 +62,7 @@ before(async () => {
   await mod.registerAttachments(app);
   await app.listen({ host: '127.0.0.1', port: PORT });
 });
-after(async () => { await app?.close(); await rm(dataDir, { recursive: true, force: true }); });
+after(async () => { app?.server.closeAllConnections(); await app?.close(); await db?.end(); await rm(dataDir, { recursive: true, force: true }); });
 
 test('upload -> fresh sender read -> reference -> member read with Range -> decrypt', async () => {
   const id = hex();
@@ -143,7 +143,7 @@ test('orphan cleanup removes unreferenced old uploads and stale parts, keeps ref
   const fresh = rows.filter((r) => r !== referenced);
   assert.ok(fresh.length > 2);
   // fresh orphans survive the grace period
-  assert.deepEqual(await mod.cleanupAttachments(), { orphans: 0, expired: 0, strays: 0 });
+  assert.deepEqual(await mod.cleanupAttachments(), { orphans: 0, expired: 0, strays: 0, uploads: 0 });
   await db.query(`UPDATE attachments SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ','now','-2 hours')`);
   const stray = path.join(mod.attachmentsDir(), `${hex()}.part`);
   await writeFile(stray, 'x');

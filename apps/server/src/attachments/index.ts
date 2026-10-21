@@ -9,6 +9,7 @@ import type { FastifyInstance } from 'fastify';
 import { requireUser } from '../auth.js';
 import { config } from '../config.js';
 import { db } from '../db.js';
+import { commitStorage, releaseStorage, reserveChunkStorage, reserveStorage, StorageQuotaError, userStorageLimit } from '../storage-quota.js';
 
 const CHUNK_SIZE = 262_144;
 const TAG_BYTES = 16;
@@ -28,7 +29,7 @@ export const attachmentLimits = (): AttachmentLimits => {
   const retention = Number(process.env.ATTACHMENT_RETENTION_DAYS);
   return {
     maxCipherBytes: maxPlain + chunks * TAG_BYTES,
-    quotaBytes: Math.floor(envNumber('USER_QUOTA_MB', 2048) * 1024 * 1024),
+    quotaBytes: userStorageLimit(),
     retentionDays: Number.isFinite(retention) && retention > 0 ? retention : null
   };
 };
@@ -66,8 +67,6 @@ export const parseRange = (header: string | undefined, size: number): ByteRange 
   return { start, end };
 };
 
-const pendingBytes = new Map<string, number>();
-
 /** Hourly job: orphans (no live message after 1 h), stale temp files, optional retention. Returns counts. */
 export const cleanupAttachments = async (): Promise<{ orphans: number; expired: number; strays: number; uploads: number }> => {
   const limits = attachmentLimits();
@@ -101,9 +100,11 @@ export const cleanupAttachments = async (): Promise<{ orphans: number; expired: 
     }
   }
 
-  // Chunked uploads with no progress for an hour: drop the row (chunks cascade) and its .part below.
+  // Also reclaim a finalization claim abandoned by a crashed worker after two hours.
   const stale = await db.query(
-    `DELETE FROM attachment_uploads WHERE finalizing = 0 AND updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '${ORPHAN_GRACE}')`
+    `DELETE FROM attachment_uploads WHERE
+      (finalizing = 0 AND updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '${ORPHAN_GRACE}'))
+      OR (finalizing = 1 AND updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 hours'))`
   );
   uploads = stale.rowCount;
 
@@ -160,13 +161,12 @@ export const registerAttachments = async (app: FastifyInstance): Promise<void> =
       if (member.rowCount !== 1) return fail(404, 'Chat not found');
       if ((await db.query('SELECT 1 FROM attachments WHERE id = $1', [id])).rowCount) return fail(409, 'Upload id already used');
 
-      const used = Number((await db.query<{ total: number | null }>(
-        'SELECT COALESCE(SUM(byte_size), 0) AS total FROM attachments WHERE uploader_id = $1 AND expired_at IS NULL', [userId]
-      )).rows[0]?.total ?? 0);
-      const pending = pendingBytes.get(userId) ?? 0;
-      if (used + pending + length > limits.quotaBytes) return fail(413, 'Storage quota exceeded');
-
-      pendingBytes.set(userId, pending + length);
+      let reservation: string;
+      try { reservation = await reserveStorage(userId, length); }
+      catch (error) {
+        if (error instanceof StorageQuotaError) return fail(error.status, error.message);
+        throw error;
+      }
       const part = partPath(id);
       let received = 0;
       try {
@@ -179,7 +179,9 @@ export const registerAttachments = async (app: FastifyInstance): Promise<void> =
         await pipeline(request.body as Readable, counter, createWriteStream(part, { flags: 'wx', mode: 0o600 }));
         if (received !== length) throw new Error('Incomplete upload');
         try {
-          await db.query('INSERT INTO attachments (id, chat_id, uploader_id, byte_size) VALUES ($1, $2, $3, $4)', [id, chatId, userId, length]);
+          await commitStorage(reservation, length, async (client) => {
+            await client.query('INSERT INTO attachments (id, chat_id, uploader_id, byte_size) VALUES ($1, $2, $3, $4)', [id, chatId, userId, length]);
+          });
         } catch {
           await rm(part, { force: true });
           return fail(409, 'Upload id already used');
@@ -194,8 +196,7 @@ export const registerAttachments = async (app: FastifyInstance): Promise<void> =
         request.log.warn({ err: error }, 'attachment upload failed');
         return fail(400, 'Upload failed');
       } finally {
-        const left = (pendingBytes.get(userId) ?? 0) - length;
-        if (left > 0) pendingBytes.set(userId, left); else pendingBytes.delete(userId);
+        await releaseStorage(reservation);
       }
       return reply.code(201).send({ id, size: length });
     });
@@ -259,16 +260,11 @@ export const registerAttachments = async (app: FastifyInstance): Promise<void> =
 
       let upload = (await db.query<UploadRow>('SELECT uploader_id, chat_id, total_bytes, chunk_count FROM attachment_uploads WHERE id = $1', [id])).rows[0];
       if (!upload) {
-        // Quota is checked once, against the declared total, plus everything this user still has in flight.
-        const used = Number((await db.query<{ total: number | null }>(
-          'SELECT COALESCE(SUM(byte_size), 0) AS total FROM attachments WHERE uploader_id = $1 AND expired_at IS NULL', [userId])).rows[0]?.total ?? 0);
-        const inflight = Number((await db.query<{ total: number | null }>(
-          'SELECT COALESCE(SUM(total_bytes), 0) AS total FROM attachment_uploads WHERE uploader_id = $1', [userId])).rows[0]?.total ?? 0);
-        const pending = pendingBytes.get(userId) ?? 0;
-        if (used + inflight + pending + total > limits.quotaBytes) return fail(413, 'Storage quota exceeded');
-        await db.query(
-          'INSERT INTO attachment_uploads (id, chat_id, uploader_id, total_bytes, chunk_count) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING',
-          [id, chatId, userId, total, count]);
+        try { await reserveChunkStorage(id, chatId, userId, total, count); }
+        catch (error) {
+          if (error instanceof StorageQuotaError) return fail(error.status, error.message);
+          throw error;
+        }
         upload = (await db.query<UploadRow>('SELECT uploader_id, chat_id, total_bytes, chunk_count FROM attachment_uploads WHERE id = $1', [id])).rows[0];
       }
       if (!upload || upload.uploader_id !== userId || upload.chat_id !== chatId || Number(upload.total_bytes) !== total) return fail(409, 'Upload id already used');
@@ -306,7 +302,8 @@ export const registerAttachments = async (app: FastifyInstance): Promise<void> =
       if (received < count) return reply.code(200).send({ received, total: count, complete: false });
 
       // Last chunk is in. Exactly one request wins the claim and finalizes.
-      const claim = await db.query('UPDATE attachment_uploads SET finalizing = 1 WHERE id = $1 AND finalizing = 0', [id]);
+      const claim = await db.query(`UPDATE attachment_uploads SET finalizing = 1,
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = $1 AND finalizing = 0`, [id]);
       if (claim.rowCount !== 1) {
         const ready = (await db.query('SELECT 1 FROM attachments WHERE id = $1', [id])).rowCount === 1;
         return reply.code(200).send({ received, total: count, complete: ready });
