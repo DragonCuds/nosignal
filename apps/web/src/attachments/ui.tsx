@@ -6,6 +6,11 @@ const S = ({ children, ...p }: P) => <svg aria-hidden="true" viewBox="0 0 24 24"
 export const FileIcon = (p: P) => <S {...p}><path d="M14 3H7.5A2.5 2.5 0 0 0 5 5.5v13A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V8Z"/><path d="M14 3v5h5"/></S>;
 export const PlayIcon = (p: P) => <S {...p} fill="currentColor" stroke="none"><path d="M8 5.5v13a1 1 0 0 0 1.5.9l10.5-6.5a1 1 0 0 0 0-1.8L9.5 4.6A1 1 0 0 0 8 5.5Z"/></S>;
 export const PauseIcon = (p: P) => <S {...p} fill="currentColor" stroke="none"><rect x="6.5" y="5" width="4" height="14" rx="1.4"/><rect x="13.5" y="5" width="4" height="14" rx="1.4"/></S>;
+export const VolumeIcon = (p: P) => <S {...p}><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5Z" fill="currentColor"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></S>;
+export const MutedIcon = (p: P) => <S {...p}><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5Z" fill="currentColor"/><path d="m16 9.5 5 5M21 9.5l-5 5"/></S>;
+export const FullscreenIcon = (p: P) => <S {...p}><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></S>;
+export const ExitFullscreenIcon = (p: P) => <S {...p}><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></S>;
+export const RetryArrowIcon = (p: P) => <S {...p}><path d="M20 7v5h-5M4 17v-5h5"/><path d="M18.2 9a7 7 0 0 0-11.8-2.5L4 9M5.8 15a7 7 0 0 0 11.8 2.5L20 15"/></S>;
 export const DownloadIcon = (p: P) => <S {...p}><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></S>;
 
 /** Circle with a progress arc; value undefined = indeterminate spin, null = idle (no arc). Children (icon) sit in the middle. */

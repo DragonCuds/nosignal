@@ -3,7 +3,8 @@ import { api, type GifMessagePayload, type Sticker, type StickerMessagePayload }
 import { CheckIcon, ClockIcon, DoubleCheckIcon, MoreIcon, ReplyIcon, RetryIcon } from '../icons.js';
 import { GifVideo } from '../GifVideo.js';
 import { attachmentPayload } from '../attachments/types.js';
-import { FileBubble, VideoBubble } from './FileBubble.js';
+import { FileBubble } from './FileBubble.js';
+import { VideoPlayer as VideoBubble } from './VideoPlayer.js';
 import { PhotoBubble } from './PhotoBubble.js';
 import { VoiceBubble } from './VoiceBubble.js';
 import { emojiOnlyCount, withEmoji } from '../emoji.js';
