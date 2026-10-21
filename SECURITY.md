@@ -71,6 +71,14 @@ chat blob do not disclose which catalogue item was sent. Without a key backup, l
 to ciphertext encrypted for that identity (see "Key backup" next). These limitations are material and must remain visible in
 any public security claim.
 
+Sticker packs shared through a chat are one deliberate exception to "which catalogue item was sent". The
+sticker reference inside a message stays encrypted, but so that recipients can tap a sticker and add its pack,
+the sender's browser tells the server once per chat and pack, when a sticker from that pack is first sent, that
+"pack P was shared into chat C" (table `chat_sticker_pack_grants`). The server therefore learns which packs
+(not which sticker, message or time) a chat has used, and any current member of that chat may then preview and
+add the whole pack and load its files. Only a member who holds a live pack can create the grant; it ends when
+the owner deletes the pack, and leaving the chat ends the member's access.
+
 ## Key backup: Auto mode (default) and Power mode
 
 The identity private key never reaches the server in the clear, but what protects it depends on the mode the user is in.

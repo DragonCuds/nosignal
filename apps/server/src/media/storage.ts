@@ -47,9 +47,14 @@ export class QuotaError extends Error {
   constructor(public readonly code: 'quota_packs' | 'quota_gifs' | 'quota_bytes', message: string) { super(message); }
 }
 
+// Packs a user keeps: the ones they own plus the ones they added from a chat (shared references, no extra bytes).
+export const PACK_COUNT_SQL = `(SELECT count(*) FROM sticker_packs sp WHERE sp.owner_id = $1
+    OR EXISTS (SELECT 1 FROM user_sticker_packs up WHERE up.pack_id = sp.id AND up.user_id = $1))`;
+export const packQuotaMessage = `You can keep at most ${MAX_PACKS_PER_USER} sticker packs. Delete a pack first.`;
+
 export const mediaUsage = async (userId: string): Promise<{ packs: number; gifs: number; bytes: number }> => {
   const result = await db.query<{ packs: number; gifs: number; bytes: number }>(`SELECT
-    (SELECT count(*) FROM sticker_packs WHERE owner_id = $1) AS packs,
+    ${PACK_COUNT_SQL} AS packs,
     (SELECT count(*) FROM gifs WHERE owner_id = $1) AS gifs,
     (SELECT COALESCE(sum(s.byte_size), 0) FROM stickers s JOIN sticker_packs p ON p.id = s.pack_id WHERE p.owner_id = $1)
       + (SELECT COALESCE(sum(byte_size), 0) FROM gifs WHERE owner_id = $1) AS bytes`, [userId]);
@@ -59,7 +64,7 @@ export const mediaUsage = async (userId: string): Promise<{ packs: number; gifs:
 
 export const assertQuota = async (userId: string, add: { packs?: number; gifs?: number; bytes?: number }): Promise<void> => {
   const usage = await mediaUsage(userId);
-  if (add.packs && usage.packs + add.packs > MAX_PACKS_PER_USER) throw new QuotaError('quota_packs', `You can keep at most ${MAX_PACKS_PER_USER} sticker packs. Delete a pack first.`);
+  if (add.packs && usage.packs + add.packs > MAX_PACKS_PER_USER) throw new QuotaError('quota_packs', packQuotaMessage);
   if (add.gifs && usage.gifs + add.gifs > MAX_GIFS_PER_USER) throw new QuotaError('quota_gifs', `You can keep at most ${MAX_GIFS_PER_USER} GIFs. Delete a GIF first.`);
   if (add.bytes && usage.bytes + add.bytes > MAX_MEDIA_BYTES_PER_USER) throw new QuotaError('quota_bytes', `Your sticker and GIF storage is limited to ${MAX_MEDIA_BYTES_PER_USER / 1024 / 1024} MB. Delete something first.`);
 };

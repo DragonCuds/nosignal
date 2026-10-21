@@ -9,7 +9,7 @@ export function MediaLibrary() {
   const [saved, setSaved] = useState<Gif[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<string | null>(null); // item id being deleted
-  const [confirm, setConfirm] = useState<{ kind: 'pack' | 'gif' | 'unsave'; id: string; name: string } | null>(null);
+  const [confirm, setConfirm] = useState<{ kind: 'pack' | 'unpack' | 'gif' | 'unsave'; id: string; name: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -31,6 +31,7 @@ export function MediaLibrary() {
     setConfirm(null); setBusy(id); setError('');
     try {
       if (kind === 'pack') await mediaApi.deletePack(id);
+      else if (kind === 'unpack') await mediaApi.removePack(id);
       else if (kind === 'gif') await mediaApi.deleteGif(id);
       else await mediaApi.unsaveGif(id);
       await load();
@@ -68,7 +69,7 @@ export function MediaLibrary() {
               <li key={p.id} className="media-lib__row">
                 <Thumb src={p.thumbUrl} />
                 <span className="media-lib__name"><strong>{p.title}</strong>{p.count !== undefined && <small>{fa(p.count)} استیکر</small>}</span>
-                <button type="button" className="media-lib__del" disabled={busy === p.id} onClick={() => setConfirm({ kind: 'pack', id: p.id, name: p.title })}>حذف</button>
+                <button type="button" className="media-lib__del" disabled={busy === p.id} onClick={() => setConfirm({ kind: p.owned === false ? 'unpack' : 'pack', id: p.id, name: p.title })}>{p.owned === false ? 'برداشتن' : 'حذف'}</button>
               </li>
             ))}
           </ul>
@@ -89,10 +90,10 @@ export function MediaLibrary() {
       {confirm && (
         <div className="media-lib__scrim" role="dialog" aria-modal="true" onClick={() => setConfirm(null)}>
           <div className="media-lib__dialog" onClick={(e) => e.stopPropagation()}>
-            <p>{confirm.kind === 'unsave' ? `${confirm.name} از ذخیره‌شده‌ها برداشته شود؟` : `${confirm.name} حذف شود؟ این کار برگشت ندارد.`}</p>
+            <p>{confirm.kind === 'unsave' ? `${confirm.name} از ذخیره‌شده‌ها برداشته شود؟` : confirm.kind === 'unpack' ? `«${confirm.name}» از استیکرهای شما برداشته شود؟ صاحب بسته آن را نگه می‌دارد.` : `${confirm.name} حذف شود؟ این کار برگشت ندارد.`}</p>
             <div className="media-lib__actions">
               <button type="button" className="media-lib__btn" onClick={() => setConfirm(null)}>انصراف</button>
-              <button type="button" className="media-lib__btn media-lib__btn--danger" onClick={() => void doDelete()}>{confirm.kind === 'unsave' ? 'برداشتن' : 'حذف'}</button>
+              <button type="button" className="media-lib__btn media-lib__btn--danger" onClick={() => void doDelete()}>{confirm.kind === 'unsave' || confirm.kind === 'unpack' ? 'برداشتن' : 'حذف'}</button>
             </div>
           </div>
         </div>

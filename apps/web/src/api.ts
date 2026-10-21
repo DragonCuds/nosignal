@@ -56,6 +56,9 @@ export type StickerPack = {
 
 export type StickerPackDetail = StickerPack & { stickers: Sticker[] };
 
+/** A pack opened from a chat: no slug, and whether the viewer already holds it / is its owner. */
+export type SharedStickerPack = Omit<StickerPack, 'slug'> & { stickers: Sticker[]; inLibrary: boolean; owned: boolean };
+
 export type StickerMessagePayload = Pick<Sticker, 'packId' | 'format' | 'w' | 'h' | 'emoji'> & {
   stickerId: string;
   fileUrl?: string;
@@ -324,6 +327,11 @@ export const api = {
   },
   stickerPacks: () => request<StickerPack[]>('/api/media/packs'),
   stickerPack: (packId: string) => request<StickerPackDetail>(`/api/media/packs/${encodeURIComponent(packId)}`),
+  /** Tell the server this chat may open this pack (it holds nothing more than "pack P was shared into chat C"). */
+  grantStickerPack: (chatId: string, packId: string) => request<void>(`/api/chats/${encodeURIComponent(chatId)}/sticker-packs/${encodeURIComponent(packId)}/grant`, { method: 'POST' }),
+  sharedStickerPack: (chatId: string, packId: string) => request<SharedStickerPack>(`/api/chats/${encodeURIComponent(chatId)}/sticker-packs/${encodeURIComponent(packId)}`),
+  addSharedStickerPack: (chatId: string, packId: string) => request<void>(`/api/chats/${encodeURIComponent(chatId)}/sticker-packs/${encodeURIComponent(packId)}/library`, { method: 'PUT' }),
+  removeStickerPackFromLibrary: (packId: string) => request<void>(`/api/media/packs/${encodeURIComponent(packId)}/library`, { method: 'DELETE' }),
   recentStickers: () => request<Sticker[]>('/api/media/stickers/recent'),
   rememberSticker: (stickerId: string) => request<void>(`/api/media/stickers/${encodeURIComponent(stickerId)}/recent`, { method: 'POST' }),
   importStickerPack: (file: File, title?: string) => {

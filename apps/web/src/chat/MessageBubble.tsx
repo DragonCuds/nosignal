@@ -23,7 +23,7 @@ const SWIPE_TRIGGER = 56;
 const SWIPE_MAX = 76;
 const LONG_PRESS_MS = 500;
 
-function StickerMessage({ payload }: { payload: StickerMessagePayload }) {
+function StickerMessage({ payload, onOpen }: { payload: StickerMessagePayload; onOpen?: () => void }) {
   const direct = payload.fileUrl
     ? { id: payload.stickerId, packId: payload.packId, fileUrl: payload.fileUrl, format: payload.format, emoji: payload.emoji, w: payload.w, h: payload.h, sort: 0 } satisfies Sticker
     : stickerCache.get(payload.stickerId);
@@ -42,7 +42,7 @@ function StickerMessage({ payload }: { payload: StickerMessagePayload }) {
   if (!sticker) return <span className="sticker-unavailable">استیکر در دسترس نیست</span>;
   const wide = Math.min(1, sticker.w / sticker.h);
   const tall = Math.min(1, sticker.h / sticker.w);
-  return (
+  const view = (
     <tg-sticker
       className="msg__sticker"
       src={sticker.fileUrl}
@@ -54,6 +54,7 @@ function StickerMessage({ payload }: { payload: StickerMessagePayload }) {
       style={{ '--sticker-w': `${STICKER_SIZE * wide}px`, aspectRatio: `${wide} / ${tall}` } as CSSProperties}
     />
   );
+  return onOpen ? <button className="sticker-tap" type="button" onClick={onOpen} aria-label="مشاهدهٔ بستهٔ استیکر">{view}</button> : view;
 }
 
 function GifMessage({ payload }: { payload: GifMessagePayload }) {
@@ -88,9 +89,11 @@ export type BubbleProps = {
   onMenu: (message: UiMessage, x: number, y: number) => void;
   onReply: (message: UiMessage) => void;
   onJump: (id: string) => void;
+  /** Tap on a sticker: open its pack (preview + "add to my stickers"). */
+  onSticker?: (message: UiMessage, packId: string) => void;
 };
 
-function BubbleView({ message, previous, next, reply, me, readId, deleting, enter, needle, active, onRetry, onDiscard, onMenu, onReply, onJump }: BubbleProps) {
+function BubbleView({ message, previous, next, reply, me, readId, deleting, enter, needle, active, onRetry, onDiscard, onMenu, onReply, onJump, onSticker }: BubbleProps) {
   const outgoing = message.senderId === me;
   const joinedAbove = sameGroup(previous, message);
   const joinedBelow = sameGroup(message, next);
@@ -120,6 +123,12 @@ function BubbleView({ message, previous, next, reply, me, readId, deleting, ente
 
   const track = useRef<HTMLDivElement>(null);
   const gesture = useRef<{ x: number; y: number; timer: number; swiping: boolean; armed: boolean } | undefined>(undefined);
+  // A long press (menu) or a swipe (reply) must not also count as a tap on the sticker when the finger lifts.
+  const noTap = useRef(false);
+  const openPack = () => {
+    if (noTap.current) { noTap.current = false; return; }
+    if (sticker?.packId && onSticker) onSticker(message, sticker.packId);
+  };
   useEffect(() => () => { if (gesture.current) window.clearTimeout(gesture.current.timer); }, []);
 
   const settle = () => {
@@ -130,11 +139,12 @@ function BubbleView({ message, previous, next, reply, me, readId, deleting, ente
     element.parentElement?.style.setProperty('--swipe', '0');
   };
   const down = (event: ReactPointerEvent) => {
+    noTap.current = false;
     if (!interactive || event.pointerType === 'mouse') return;
     const x = event.clientX;
     const y = event.clientY;
     const timer = window.setTimeout(() => {
-      if (gesture.current && !gesture.current.swiping) { onMenu(message, x, y); gesture.current = undefined; }
+      if (gesture.current && !gesture.current.swiping) { noTap.current = true; onMenu(message, x, y); gesture.current = undefined; }
     }, LONG_PRESS_MS);
     gesture.current = { x, y, timer, swiping: false, armed: false };
     if (track.current) track.current.style.transition = 'none';
@@ -148,6 +158,7 @@ function BubbleView({ message, previous, next, reply, me, readId, deleting, ente
       window.clearTimeout(state.timer);
       if (Math.abs(dy) > Math.abs(dx) || dx > 0) { gesture.current = undefined; return; }
       state.swiping = true;
+      noTap.current = true;
     }
     if (!state.swiping) return;
     const pull = Math.min(SWIPE_MAX, -dx);
@@ -191,7 +202,7 @@ function BubbleView({ message, previous, next, reply, me, readId, deleting, ente
     <div
       className={className}
       data-message-id={message.id}
-      onContextMenu={(event) => { if (interactive) { event.preventDefault(); onMenu(message, event.clientX, event.clientY); } }}
+      onContextMenu={(event) => { if (interactive) { event.preventDefault(); noTap.current = true; onMenu(message, event.clientX, event.clientY); } }}
       onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
     >
       <span className="msg__swipe-hint" aria-hidden="true"><ReplyIcon /></span>
@@ -217,7 +228,7 @@ function BubbleView({ message, previous, next, reply, me, readId, deleting, ente
               {message.kind === 'file' && <FileBubble chatId={message.chatId} attachment={att.attachment} />}
               {caption && <span className="bubble__text att-caption">{renderText(caption, needle, active)}</span>}
             </>
-          ) : sticker ? <StickerMessage payload={sticker} /> : gif ? <GifMessage payload={gif} /> : (
+          ) : sticker ? <StickerMessage payload={sticker} onOpen={interactive && onSticker ? openPack : undefined} /> : gif ? <GifMessage payload={gif} /> : (
             <span className={`bubble__text${message.deletedAt ? ' bubble__text--deleted' : ''}`}>
               {message.deletedAt ? 'این پیام حذف شده است' : renderText(message.text ?? excerpt(message), needle, active)}
             </span>

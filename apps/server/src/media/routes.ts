@@ -7,12 +7,13 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { requireUser } from '../auth.js';
+import { ensureCanPost } from '../channels.js';
 import { db } from '../db.js';
 import { commitStorage, releaseStorage, reserveStorage, StorageQuotaError } from '../storage-quota.js';
 import { cleanupEncryptedMedia } from './cleanup.js';
 import { importStickerPack } from './import-pack.js';
 import { getTelegramImport, publicJob, startTelegramImport, telegramImportEnabled } from './telegram-import.js';
-import { assertQuota, contentPath, ensureStorage, mediaDir, mediaUrl, moveContent, QuotaError, removeUnreferencedFiles, temporaryPath } from './storage.js';
+import { assertQuota, contentPath, ensureStorage, mediaDir, mediaUrl, MAX_PACKS_PER_USER, moveContent, PACK_COUNT_SQL, packQuotaMessage, QuotaError, removeUnreferencedFiles, temporaryPath } from './storage.js';
 import { probeMedia } from './validation.js';
 
 const execFileAsync = promisify(execFile);
@@ -47,11 +48,11 @@ const ENCRYPTED_MEDIA_RATE_LIMIT = {
 } as const;
 const mimeTypes: Record<string, string> = { '.tgs': 'application/gzip', '.webm': 'video/webm', '.webp': 'image/webp', '.mp4': 'video/mp4' };
 
-type PackRow = { id: string; slug: string; title: string; thumb_path: string | null };
+type PackRow = { id: string; slug: string; title: string; thumb_path: string | null; owner_id?: string | null; viewer_id?: string };
 type StickerRow = { id: string; pack_id: string; file_path: string; format: 'tgs' | 'webm' | 'webp'; emoji: string; w: number; h: number; sort: number };
 type GifRow = { id: string; mp4_path: string; poster_path: string; w: number; h: number; duration_ms: number; tags: string[] };
 
-const packOutput = (pack: PackRow) => ({ id: pack.id, slug: pack.slug, title: pack.title, thumbUrl: mediaUrl(pack.thumb_path) });
+const packOutput = (pack: PackRow) => ({ id: pack.id, slug: pack.slug, title: pack.title, thumbUrl: mediaUrl(pack.thumb_path), ...(pack.owner_id === undefined ? {} : { owned: String(pack.owner_id) === String(pack.viewer_id) }) });
 const stickerOutput = (sticker: StickerRow) => ({ id: sticker.id, packId: sticker.pack_id, fileUrl: mediaUrl(sticker.file_path), format: sticker.format, emoji: sticker.emoji, w: sticker.w, h: sticker.h, sort: sticker.sort });
 const gifOutput = (gif: GifRow) => ({ id: gif.id, mp4Url: mediaUrl(gif.mp4_path), posterUrl: mediaUrl(gif.poster_path), w: gif.w, h: gif.h, durationMs: gif.duration_ms, tags: gif.tags });
 const parseId = (value: unknown): string | null => typeof value === 'string' && /^[1-9]\d*$/.test(value) ? value : null;
@@ -59,9 +60,17 @@ const parseId = (value: unknown): string | null => typeof value === 'string' && 
 const errorStatus = (error: unknown): number => error instanceof QuotaError ? 413 : 400;
 const errorBody = (error: unknown, fallback: string) => ({ error: error instanceof Error ? error.message : fallback, ...(error instanceof QuotaError ? { code: error.code } : {}) });
 
-// SQL: sticker row `s` is visible to user `$N` when they own its pack or a live message in one of their chats shows it.
+// SQL: sticker row `s` is visible to user `$N` when they own its pack or hold it in their library, when the pack was
+// shared into a chat they are CURRENTLY a member of (chat_sticker_pack_grants, live packs only), or (legacy rows with a
+// readable payload) when a live message in one of their chats shows that exact sticker.
 const stickerVisible = (user: string, sticker = 's'): string => `(
   EXISTS (SELECT 1 FROM sticker_packs sp WHERE sp.id = ${sticker}.pack_id AND sp.owner_id = ${user})
+  OR EXISTS (SELECT 1 FROM user_sticker_packs up WHERE up.pack_id = ${sticker}.pack_id AND up.user_id = ${user})
+  OR EXISTS (
+    SELECT 1 FROM chat_sticker_pack_grants g
+    JOIN chat_members gm ON gm.chat_id = g.chat_id AND gm.user_id = ${user}
+    JOIN sticker_packs gp ON gp.id = g.pack_id AND gp.owner_id IS NOT NULL
+    WHERE g.pack_id = ${sticker}.pack_id)
   OR EXISTS (
     SELECT 1 FROM messages m JOIN chat_members cm ON cm.chat_id = m.chat_id
     WHERE cm.user_id = ${user} AND m.deleted_at IS NULL
@@ -252,19 +261,88 @@ export const registerMediaRoutes = async (app: FastifyInstance): Promise<void> =
   });
 
   app.get('/api/media/packs', { preHandler: requireUser, config: { rateLimit: MEDIA_READ_RATE_LIMIT } }, async (request) => {
-    const result = await db.query<PackRow>(`SELECT p.id, p.slug, p.title, p.thumb_path FROM user_sticker_packs up
-      JOIN sticker_packs p ON p.id = up.pack_id WHERE up.user_id = $1 AND p.owner_id = $1 ORDER BY up.sort, p.id`, [request.user!.id]);
+    const result = await db.query<PackRow>(`SELECT p.id, p.slug, p.title, p.thumb_path, p.owner_id, up.user_id AS viewer_id FROM user_sticker_packs up
+      JOIN sticker_packs p ON p.id = up.pack_id WHERE up.user_id = $1 ORDER BY up.sort, p.id`, [request.user!.id]);
     return result.rows.map(packOutput);
   });
 
   app.get<{ Params: { id: string } }>('/api/media/packs/:id', { preHandler: requireUser, config: { rateLimit: MEDIA_READ_RATE_LIMIT } }, async (request, reply) => {
     const packId = parseId(request.params.id);
     if (!packId) return reply.code(400).send({ error: 'Invalid pack id' });
-    const pack = await db.query<PackRow>(`SELECT p.id, p.slug, p.title, p.thumb_path FROM sticker_packs p
-      JOIN user_sticker_packs up ON up.pack_id = p.id WHERE p.id = $1 AND up.user_id = $2 AND p.owner_id = $2`, [packId, request.user!.id]);
+    const pack = await db.query<PackRow>(`SELECT p.id, p.slug, p.title, p.thumb_path, p.owner_id, up.user_id AS viewer_id FROM sticker_packs p
+      JOIN user_sticker_packs up ON up.pack_id = p.id WHERE p.id = $1 AND up.user_id = $2`, [packId, request.user!.id]);
     if (!pack.rows[0]) return reply.code(404).send({ error: 'Pack not found' });
     const stickers = await db.query<StickerRow>('SELECT id, pack_id, file_path, format, emoji, w, h, sort FROM stickers WHERE pack_id = $1 ORDER BY sort, id', [packId]);
     return { ...packOutput(pack.rows[0]), stickers: stickers.rows.map(stickerOutput) };
+  });
+
+  // --- Sharing a pack through a chat -------------------------------------------------------------------------
+  // The message itself is end-to-end encrypted, so the server cannot see which pack a sticker came from. Instead the
+  // sender's client records one (chat, pack) grant; current members of that chat may then preview and add the pack.
+  // Every refusal below is the same 404, so nobody can probe which pack ids exist or are shared where.
+  const sharedPack = async (chatId: string, packId: string, userId: string): Promise<PackRow | undefined> => (await db.query<PackRow>(
+    `SELECT p.id, p.slug, p.title, p.thumb_path, p.owner_id, $3 AS viewer_id FROM sticker_packs p
+     WHERE p.id = $2 AND p.owner_id IS NOT NULL
+       AND EXISTS (SELECT 1 FROM chat_sticker_pack_grants g WHERE g.chat_id = $1 AND g.pack_id = p.id)
+       AND EXISTS (SELECT 1 FROM chat_members cm WHERE cm.chat_id = $1 AND cm.user_id = $3)`, [chatId, packId, userId])).rows[0];
+  const NO_PACK = { error: 'Pack not found' };
+
+  app.post<{ Params: { id: string; packId: string } }>('/api/chats/:id/sticker-packs/:packId/grant', { preHandler: requireUser, config: { rateLimit: MEDIA_WRITE_RATE_LIMIT } }, async (request, reply) => {
+    const chatId = parseId(request.params.id);
+    const packId = parseId(request.params.packId);
+    if (!chatId || !packId) return reply.code(400).send({ error: 'Invalid chat or pack id' });
+    const userId = request.user!.id;
+    if (!(await db.query('SELECT 1 FROM chat_members WHERE chat_id = $1 AND user_id = $2', [chatId, userId])).rowCount) return reply.code(404).send(NO_PACK);
+    if (!(await ensureCanPost(chatId, userId, reply))) return;
+    // Only somebody who holds the pack may share it, and a released (ownerless) pack can no longer be shared.
+    const held = await db.query(`SELECT 1 FROM user_sticker_packs up JOIN sticker_packs p ON p.id = up.pack_id
+      WHERE up.user_id = $1 AND up.pack_id = $2 AND p.owner_id IS NOT NULL`, [userId, packId]);
+    if (!held.rowCount) return reply.code(404).send(NO_PACK);
+    await db.query('INSERT INTO chat_sticker_pack_grants (chat_id, pack_id, granted_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [chatId, packId, userId]);
+    return reply.code(204).send();
+  });
+
+  app.get<{ Params: { id: string; packId: string } }>('/api/chats/:id/sticker-packs/:packId', { preHandler: requireUser, config: { rateLimit: MEDIA_READ_RATE_LIMIT } }, async (request, reply) => {
+    const chatId = parseId(request.params.id);
+    const packId = parseId(request.params.packId);
+    if (!chatId || !packId) return reply.code(400).send({ error: 'Invalid chat or pack id' });
+    const userId = request.user!.id;
+    const pack = await sharedPack(chatId, packId, userId);
+    if (!pack) return reply.code(404).send(NO_PACK);
+    const stickers = await db.query<StickerRow>('SELECT id, pack_id, file_path, format, emoji, w, h, sort FROM stickers WHERE pack_id = $1 ORDER BY sort, id', [packId]);
+    const inLibrary = (await db.query('SELECT 1 FROM user_sticker_packs WHERE user_id = $1 AND pack_id = $2', [userId, packId])).rowCount === 1;
+    const { slug: _slug, ...output } = packOutput(pack);
+    return { ...output, inLibrary, stickers: stickers.rows.map(stickerOutput) };
+  });
+
+  app.put<{ Params: { id: string; packId: string } }>('/api/chats/:id/sticker-packs/:packId/library', { preHandler: requireUser, config: { rateLimit: MEDIA_WRITE_RATE_LIMIT } }, async (request, reply) => {
+    const chatId = parseId(request.params.id);
+    const packId = parseId(request.params.packId);
+    if (!chatId || !packId) return reply.code(400).send({ error: 'Invalid chat or pack id' });
+    const userId = request.user!.id;
+    if (!(await sharedPack(chatId, packId, userId))) return reply.code(404).send(NO_PACK);
+    if ((await db.query('SELECT 1 FROM user_sticker_packs WHERE user_id = $1 AND pack_id = $2', [userId, packId])).rowCount) return reply.code(204).send();
+    // One statement: the cap check and the insert cannot be separated by a concurrent add.
+    const added = await db.query(`INSERT INTO user_sticker_packs (user_id, pack_id, sort)
+      SELECT $1, $2, COALESCE((SELECT max(sort) + 1 FROM user_sticker_packs WHERE user_id = $1), 0)
+      WHERE ${PACK_COUNT_SQL} < $3 ON CONFLICT DO NOTHING`, [userId, packId, MAX_PACKS_PER_USER]);
+    if (!added.rowCount && !(await db.query('SELECT 1 FROM user_sticker_packs WHERE user_id = $1 AND pack_id = $2', [userId, packId])).rowCount) {
+      return reply.code(413).send({ error: packQuotaMessage, code: 'quota_packs' });
+    }
+    return reply.code(204).send();
+  });
+
+  // Drops only the caller's own library link (a shared reference). The owner deletes the pack instead.
+  app.delete<{ Params: { id: string } }>('/api/media/packs/:id/library', { preHandler: requireUser, config: { rateLimit: MEDIA_WRITE_RATE_LIMIT } }, async (request, reply) => {
+    const packId = parseId(request.params.id);
+    if (!packId) return reply.code(400).send({ error: 'Invalid pack id' });
+    const userId = request.user!.id;
+    if ((await db.query('SELECT 1 FROM sticker_packs WHERE id = $1 AND owner_id = $2', [packId, userId])).rowCount) {
+      return reply.code(409).send({ error: 'You own this pack; delete it instead of removing it.' });
+    }
+    await db.query('DELETE FROM user_sticker_packs WHERE user_id = $1 AND pack_id = $2', [userId, packId]);
+    await db.query('DELETE FROM recent_stickers WHERE user_id = $1 AND sticker_id IN (SELECT id FROM stickers WHERE pack_id = $2)', [userId, packId]);
+    return reply.code(204).send();
   });
 
   app.get('/api/media/stickers/recent', { preHandler: requireUser, config: { rateLimit: MEDIA_READ_RATE_LIMIT } }, async (request) => {
@@ -356,8 +434,10 @@ export const registerMediaRoutes = async (app: FastifyInstance): Promise<void> =
     // Stickers already sent in chats must keep loading for those chats: then the pack is only released, not erased.
     const sent = await db.query(`SELECT 1 FROM stickers s JOIN messages m ON m.kind = 'sticker' AND m.deleted_at IS NULL
       AND CAST(json_extract(m.payload, '$.stickerId') AS TEXT) = CAST(s.id AS TEXT) WHERE s.pack_id = $1 LIMIT 1`, [packId]);
+    // Everyone who added the pack loses it from their library too; sharing grants end with it.
     await db.query('DELETE FROM user_sticker_packs WHERE pack_id = $1', [packId]);
-    await db.query('DELETE FROM recent_stickers WHERE sticker_id IN (SELECT id FROM stickers WHERE pack_id = $1) AND user_id = $2', [packId, request.user!.id]);
+    await db.query('DELETE FROM chat_sticker_pack_grants WHERE pack_id = $1', [packId]);
+    await db.query('DELETE FROM recent_stickers WHERE sticker_id IN (SELECT id FROM stickers WHERE pack_id = $1)', [packId]);
     if (sent.rows[0]) {
       await db.query('UPDATE sticker_packs SET owner_id = NULL WHERE id = $1', [packId]);
     } else {

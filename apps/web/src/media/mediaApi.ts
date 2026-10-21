@@ -1,4 +1,4 @@
-export type Pack = { id: string; slug: string; title: string; thumbUrl: string | null; count?: number };
+export type Pack = { id: string; slug: string; title: string; thumbUrl: string | null; count?: number; /** false: added from a chat, so only the link is removed */ owned?: boolean };
 export type Gif = { id: string; mp4Url: string | null; posterUrl: string | null; w: number; h: number; durationMs: number; tags: string[] };
 
 export const MAX_PACKS = 20;
@@ -80,6 +80,7 @@ export const mediaApi = {
   gifs: () => call<Gif[]>('/api/media/gifs'),
   savedGifs: () => call<Gif[]>('/api/media/gifs/saved'),
   deletePack: (id: string) => call<void>(`/api/media/packs/${encodeURIComponent(id)}`, 'DELETE'),
+  removePack: (id: string) => call<void>(`/api/media/packs/${encodeURIComponent(id)}/library`, 'DELETE'),
   deleteGif: (id: string) => call<void>(`/api/media/gifs/${encodeURIComponent(id)}`, 'DELETE'),
   unsaveGif: (id: string) => call<void>(`/api/media/gifs/${encodeURIComponent(id)}/save`, 'DELETE'),
   importPack: (file: File, onProgress?: (pct: number) => void) =>

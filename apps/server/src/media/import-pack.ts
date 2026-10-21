@@ -4,7 +4,7 @@ import { rm, stat, writeFile } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { db } from '../db.js';
-import { assertQuota, ensureStorage, MAX_PACKS_PER_USER, QuotaError, saveContent, temporaryPath } from './storage.js';
+import { assertQuota, ensureStorage, MAX_PACKS_PER_USER, PACK_COUNT_SQL, packQuotaMessage, QuotaError, saveContent, temporaryPath } from './storage.js';
 import { validateTgs, validateWebmSticker, validateWebpSticker } from './validation.js';
 
 const execFileAsync = promisify(execFile);
@@ -111,8 +111,8 @@ export const importStickerPack = async (zipPath: string, ownerId: string, overri
   const client = await db.connect();
   try {
     await client.query('BEGIN');
-    const owned = await client.query<{ n: number }>('SELECT count(*) AS n FROM sticker_packs WHERE owner_id = $1', [ownerId]);
-    if (Number(owned.rows[0].n) >= MAX_PACKS_PER_USER) throw new QuotaError('quota_packs', `You can keep at most ${MAX_PACKS_PER_USER} sticker packs. Delete a pack first.`);
+    const owned = await client.query<{ n: number }>(`SELECT ${PACK_COUNT_SQL} AS n`, [ownerId]);
+    if (Number(owned.rows[0].n) >= MAX_PACKS_PER_USER) throw new QuotaError('quota_packs', packQuotaMessage);
     // slug is globally unique; never reveal that another user has the same one, just make ours distinct.
     let finalSlug = slug;
     if ((await client.query('SELECT 1 FROM sticker_packs WHERE slug = $1', [finalSlug])).rowCount) {

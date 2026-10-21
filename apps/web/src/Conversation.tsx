@@ -18,6 +18,7 @@ import { attachmentPayload, type AttachmentInput } from './attachments/types.js'
 import { localBlobs } from './attachments/progress.js';
 import type { SenderDeps } from './attachments/send.js';
 import { Bubble, rememberSticker } from './chat/MessageBubble.js';
+import { StickerPackSheet, sharePackInChat, type PackTarget } from './chat/StickerPackSheet.js';
 import { MessageMenu, placeMenu, type MenuState } from './chat/MessageMenu.js';
 import { dateLabel, gifPayload, isTemp, sameGroup, type MenuAction, type Mode, type PeerPresence, type UiMessage } from './chat/helpers.js';
 
@@ -517,6 +518,7 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
   const sendSticker = async (sticker: Sticker) => {
     const payload: StickerMessagePayload = { packId: sticker.packId, stickerId: sticker.id, fileUrl: sticker.fileUrl, format: sticker.format, emoji: sticker.emoji, w: sticker.w, h: sticker.h };
     rememberSticker(sticker);
+    sharePackInChat(chat.id, sticker.packId); // fire-and-forget: lets this chat's members open the pack; never blocks the send
     await sendMedia('sticker', payload, sticker.fileUrl, replyId, () => { void api.rememberSticker(sticker.id).catch(() => undefined); });
   };
 
@@ -575,6 +577,8 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
     if (closeTimer.current) clearTimeout(closeTimer.current);
     closeTimer.current = window.setTimeout(() => setMenu(null), MENU_CLOSE_MS);
   }, []);
+  const [packTarget, setPackTarget] = useState<PackTarget | null>(null);
+  const openPack = useLatest((message: UiMessage, packId: string) => setPackTarget({ chatId: message.chatId, packId }));
   const startReply = useLatest((message: UiMessage) => setMode({ kind: 'reply', message }));
 
   const jump = useCallback((id: string) => {
@@ -665,7 +669,7 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
                       reply={message.replyToId ? byId.get(message.replyToId) : undefined}
                       me={currentUser.id} readId={peerReadId} deleting={deleting.has(message.id)} enter={freshKeys.current.has(message.clientKey ?? message.id)}
                       needle={needle} active={activeMatch?.id === message.id}
-                      onRetry={retry} onDiscard={discardFailed} onMenu={openMenu} onReply={startReply} onJump={jump}
+                      onRetry={retry} onDiscard={discardFailed} onMenu={openMenu} onReply={startReply} onJump={jump} onSticker={openPack}
                     />
                   </Fragment>
                 ))}
@@ -683,6 +687,7 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
         : canPost
         ? <Composer mode={mode} cancel={() => setMode(null)} submit={submit} sendAttachment={attach} sendSticker={sendSticker} sendGif={sendGif} uploadGif={uploadGif} typing={typing} />
         : <div className="channel-readonly" role="note">فقط مدیران کانال می‌توانند پست بگذارند.</div>}
+      <StickerPackSheet target={packTarget} onClose={() => setPackTarget(null)} />
       {isGroup && chat.groupId && <GroupInfo open={infoOpen} groupId={chat.groupId} chatId={chat.id} onClose={() => setInfoOpen(false)} onChanged={() => onChatChanged(chat.id)} onGone={() => { onBack(); onChatChanged(chat.id); }} />}
       {isChannel && <ChannelInfo open={infoOpen} channelId={chat.channelId ?? chat.id} onClose={() => setInfoOpen(false)} onChanged={() => onChatChanged(chat.id)} onGone={() => { onBack(); onChatChanged(chat.id); }} />}
       {menu && <MessageMenu menu={menu} me={currentUser.id} close={closeMenu} action={runAction} />}
