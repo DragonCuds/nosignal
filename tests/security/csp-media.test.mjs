@@ -15,6 +15,15 @@ test('CSP lets the page play and show blob: media', () => {
 });
 
 test('video bubbles still use a blob: source', () => {
-  const bubble = readFileSync(new URL('../../apps/web/src/chat/FileBubble.tsx', import.meta.url), 'utf8');
-  assert.match(bubble, /<video[^>]*src=\{url\}/);
+  // The player lives in VideoPlayer.tsx (FileBubble.tsx is only the download fallback).
+  const player = readFileSync(new URL('../../apps/web/src/chat/VideoPlayer.tsx', import.meta.url), 'utf8');
+  // The decrypted bytes become an object URL (blob:) ...
+  assert.match(player, /const url = useBlobUrl\(blob\b/);
+  assert.match(readFileSync(new URL('../../apps/web/src/attachments/load.ts', import.meta.url), 'utf8'), /URL\.createObjectURL\(/);
+  // ... and that URL is the only thing the <video> element plays; no server address goes into src.
+  const tag = /<video\s[\s\S]*?\n\s*\/>/.exec(player)?.[0] ?? '';
+  const srcs = [...tag.matchAll(/\bsrc=(\{`[^`]*`\}|\{[^}]*\}|"[^"]*"|'[^']*')/g)].map((m) => m[1]);
+  assert.equal(srcs.length, 1, 'exactly one src on the <video> element');
+  assert.match(srcs[0], /^\{`\$\{url\}[^`]*`\}$|^\{url\}$/);
+  assert.doesNotMatch(tag, /\/api\/|https?:/);
 });

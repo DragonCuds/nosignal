@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { after, before, test } from 'node:test';
+import { FFMPEG, skipNoFfmpeg } from './ffmpeg.mjs';
 
 const root = path.resolve(import.meta.dirname, '../..');
 const dist = process.env.SERVER_DIST ? path.resolve(process.env.SERVER_DIST) : path.join(root, 'apps/server/dist');
@@ -47,7 +48,7 @@ const makeZip = async (name, seed) => {
   const dir = path.join(work, name);
   await mkdir(dir, { recursive: true });
   for (let i = 0; i < 2; i += 1) {
-    execFileSync('/usr/bin/ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=0x${seed}${i}${i}${i}${i}:s=512x256`, '-frames:v', '1', path.join(dir, `s${i}.webp`)]);
+    execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=0x${seed}${i}${i}${i}${i}:s=512x256`, '-frames:v', '1', path.join(dir, `s${i}.webp`)]);
   }
   const zip = path.join(work, `${name}.zip`);
   execFileSync('python3', ['-c', 'import sys,zipfile,os\nz=zipfile.ZipFile(sys.argv[1],"w")\nfor f in sorted(os.listdir(sys.argv[2])): z.write(os.path.join(sys.argv[2],f),f)\nz.close()', zip, dir]);
@@ -55,7 +56,7 @@ const makeZip = async (name, seed) => {
 };
 const makeGif = async (name, color) => {
   const file = path.join(work, `${name}.gif`);
-  execFileSync('/usr/bin/ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=${color}:s=64x64:d=1:r=5`, file]);
+  execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=${color}:s=64x64:d=1:r=5`, file]);
   return readFile(file);
 };
 
@@ -143,7 +144,7 @@ test('a brand-new user starts empty', async () => {
 });
 
 let pack; let packDetail;
-test('a user imports a pack and sees only their own', async () => {
+test('a user imports a pack and sees only their own', { skip: skipNoFfmpeg }, async () => {
   const zip = await makeZip('p1', 'ff');
   const res = await upload('/api/media/packs/import', 'alice', 'one.zip', zip, { slug: 'same', title: 'Mine' });
   assert.equal(res.statusCode, 201, res.body);
@@ -162,7 +163,7 @@ test('a user imports a pack and sees only their own', async () => {
   assert.equal((await send('GET', '/api/media/packs', { user: 'alice' })).json().length, 1);
 });
 
-test('/media is private: owner yes, stranger and anonymous no', async () => {
+test('/media is private: owner yes, stranger and anonymous no', { skip: skipNoFfmpeg }, async () => {
   const url = packDetail.stickers[0].fileUrl;
   assert.equal((await send('GET', url, { user: 'alice' })).statusCode, 200);
   assert.equal((await send('GET', url, { user: 'bob' })).statusCode, 404);
@@ -175,7 +176,7 @@ test('/media is private: owner yes, stranger and anonymous no', async () => {
   assert.equal((await send('POST', `/api/media/stickers/${packDetail.stickers[0].id}/recent`, { user: 'alice' })).statusCode, 204);
 });
 
-test('a sticker sent in a chat loads for its members only, and stops when the message is deleted', async () => {
+test('a sticker sent in a chat loads for its members only, and stops when the message is deleted', { skip: skipNoFfmpeg }, async () => {
   const sticker = packDetail.stickers[0];
   const messageId = await sendMessage(ids.chat, ids.alice, 'sticker', { stickerId: sticker.id }, 1);
   assert.equal((await send('GET', sticker.fileUrl, { user: 'bob' })).statusCode, 200);
@@ -189,7 +190,7 @@ test('a sticker sent in a chat loads for its members only, and stops when the me
 });
 
 let gif;
-test('GIF upload is private; list and saved are per user', async () => {
+test('GIF upload is private; list and saved are per user', { skip: skipNoFfmpeg }, async () => {
   const res = await upload('/api/media/gifs/upload', 'alice', 'a.gif', await makeGif('g1', 'red'), { tags: 'red' });
   assert.equal(res.statusCode, 201, res.body);
   gif = res.json();
@@ -202,7 +203,7 @@ test('GIF upload is private; list and saved are per user', async () => {
   assert.equal((await send('PUT', `/api/media/gifs/${gif.id}/save`, { user: 'alice' })).statusCode, 204);
 });
 
-test('a GIF sent in a chat loads for members and can be saved by them', async () => {
+test('a GIF sent in a chat loads for members and can be saved by them', { skip: skipNoFfmpeg }, async () => {
   await sendMessage(ids.chat, ids.alice, 'gif', { gifId: gif.id }, 2);
   assert.equal((await send('GET', gif.mp4Url, { user: 'bob' })).statusCode, 200);
   assert.equal((await send('GET', gif.mp4Url, { user: 'carol' })).statusCode, 404);
@@ -211,7 +212,7 @@ test('a GIF sent in a chat loads for members and can be saved by them', async ()
   assert.deepEqual((await send('GET', '/api/media/gifs', { user: 'bob' })).json().map((g) => g.id), [gif.id]);
 });
 
-test('delete is owner only; sent items are released, not erased', async () => {
+test('delete is owner only; sent items are released, not erased', { skip: skipNoFfmpeg }, async () => {
   assert.equal((await send('DELETE', `/api/media/gifs/${gif.id}`, { user: 'carol' })).statusCode, 404);
   assert.equal((await send('DELETE', `/api/media/gifs/${gif.id}`, { user: 'bob' })).statusCode, 404);
   assert.equal((await send('DELETE', `/api/media/gifs/${gif.id}`)).statusCode, 401);
@@ -244,7 +245,7 @@ test('delete is owner only; sent items are released, not erased', async () => {
   assert.equal((await db.query('SELECT 1 FROM sticker_packs WHERE id = $1', [bobPack.id])).rowCount, 0);
 });
 
-test('quotas: packs, GIFs and bytes give clear errors', async () => {
+test('quotas: packs, GIFs and bytes give clear errors', { skip: skipNoFfmpeg }, async () => {
   const zip = await makeZip('p3', 'dd');
   // GIF count
   for (let i = 0; i < 200; i += 1) {

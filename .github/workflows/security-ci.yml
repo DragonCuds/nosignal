@@ -31,6 +31,8 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Rebuild required native modules
         run: npm rebuild argon2
+      - name: Install ffmpeg (media fixtures and transcoding tests)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Verify build and security invariants
         run: npm run verify
 

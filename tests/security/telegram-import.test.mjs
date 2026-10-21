@@ -7,6 +7,7 @@ import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { createRequire } from 'node:module';
 import { after, before, test } from 'node:test';
+import { FFMPEG, skipNoFfmpeg } from './ffmpeg.mjs';
 
 const root = path.resolve(import.meta.dirname, '../..');
 const dist = process.env.SERVER_DIST ? path.resolve(process.env.SERVER_DIST) : path.join(root, 'apps/server/dist');
@@ -31,8 +32,8 @@ const { createSession, requireTrustedOrigin } = await load('auth.js');
 const { redact, parsePackName } = await load('media/telegram-import.js');
 
 // ---- fixtures + fake Bot API ----
-const webp = (color) => { const f = path.join(work, `${color}.webp`); execFileSync('/usr/bin/ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=0x${color}:s=512x256`, '-frames:v', '1', f]); return readFile(f); };
-const webm = async () => { const f = path.join(work, 'a.webm'); execFileSync('/usr/bin/ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x336699:s=512x256:d=1:r=10', '-c:v', 'libvpx-vp9', '-b:v', '50k', f]); return readFile(f); };
+const webp = (color) => { if (skipNoFfmpeg) return Buffer.alloc(0); const f = path.join(work, `${color}.webp`); execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=0x${color}:s=512x256`, '-frames:v', '1', f]); return readFile(f); };
+const webm = async () => { if (skipNoFfmpeg) return Buffer.alloc(0); const f = path.join(work, 'a.webm'); execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x336699:s=512x256:d=1:r=10', '-c:v', 'libvpx-vp9', '-b:v', '50k', f]); return readFile(f); };
 const tgs = gzipSync(Buffer.from(JSON.stringify({ v: '5.5.2', fr: 30, ip: 0, op: 30, w: 512, h: 512, layers: [], assets: [] })));
 const files = {
   'stickers/a.webp': await webp('ff0000'), 'stickers/b.tgs': tgs, 'stickers/c.webm': await webm(),
@@ -134,7 +135,7 @@ test('auth, origin and invalid links are rejected', async () => {
   assert.deepEqual((await send('GET', '/api/stickers/import/telegram/status', { user: 'alice' })).json(), { enabled: true });
 });
 
-test('imports static, animated and video stickers into the user library', async () => {
+test('imports static, animated and video stickers into the user library', { skip: skipNoFfmpeg }, async () => {
   const job = await run('alice', 'https://t.me/addstickers/TestPack');
   assert.equal(job.state, 'done'); assert.deepEqual([job.imported, job.skipped, job.failed], [3, 0, 0]);
   const packs = (await send('GET', '/api/media/packs', { user: 'alice' })).json();
@@ -149,7 +150,7 @@ test('imports static, animated and video stickers into the user library', async 
   assert.equal((await send('GET', `/api/stickers/import/telegram/${job.id}`, { user: 'bob' })).statusCode, 404);
 });
 
-test('re-import is idempotent and a second user gets their own pack', async () => {
+test('re-import is idempotent and a second user gets their own pack', { skip: skipNoFfmpeg }, async () => {
   const again = await run('alice', 'tg://addstickers?set=TestPack');
   assert.equal(again.state, 'done'); assert.deepEqual([again.imported, again.skipped], [0, 3]);
   const packs = (await send('GET', '/api/media/packs', { user: 'alice' })).json();
@@ -160,7 +161,7 @@ test('re-import is idempotent and a second user gets their own pack', async () =
   assert.equal((await send('GET', '/api/media/packs', { user: 'bob' })).json().length, 1);
 });
 
-test('oversize files, path traversal and redirects fail per sticker without leaving the host', async () => {
+test('oversize files, path traversal and redirects fail per sticker without leaving the host', { skip: skipNoFfmpeg }, async () => {
   const job = await run('carol', 'MixedPack');
   assert.equal(job.state, 'done');
   assert.deepEqual([job.imported, job.failed], [1, 3]);
@@ -178,14 +179,14 @@ test('pack with too many stickers, unknown pack and unreachable Telegram', async
   process.env.TELEGRAM_API_BASE = fakeBase;
 });
 
-test('the token never appears in responses and is redacted from text', async () => {
+test('the token never appears in responses and is redacted from text', { skip: skipNoFfmpeg }, async () => {
   assert.equal(redact(`GET https://x/bot${TOKEN}/getFile failed ${TOKEN}`).includes('FAKE_test_token'), false);
   assert.equal(redact('https://api.telegram.org/bot987654:ABCDEFGHIJ_klm/getMe').includes('ABCDEFGHIJ'), false);
   assert.ok(bodies.length > 10);
   assert.ok(bodies.every((b) => !b.includes('FAKE_test_token') && !b.includes(TOKEN)));
 });
 
-test('imports are rate-limited per user', async () => {
+test('imports are rate-limited per user', { skip: skipNoFfmpeg }, async () => {
   for (let i = 0; i < 5; i += 1) assert.equal((await run('erin', 'TestPack')).state, 'done');
   const r = await post('erin', 'TestPack');
   assert.equal(r.statusCode, 429); assert.equal(r.json().code, 'rate_limited');

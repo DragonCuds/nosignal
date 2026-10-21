@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
 import WebSocket from '../../node_modules/ws/wrapper.mjs';
@@ -51,7 +52,7 @@ const upload = (cookie, bytes = 64, ip) => {
 };
 
 before(async () => {
-  dir = await mkdtemp('/root/os-fix5/revoke-');
+  dir = await mkdtemp(path.join(os.tmpdir(), 'tel-revoke-'));
   const env = { ...process.env, NODE_ENV: 'test', DATA_DIR: dir, SESSION_SECRET: 'x'.repeat(40), WEBAUTHN_RP_ID: '127.0.0.1', TRUSTED_ORIGINS: ORIGIN, PORT: String(PORT) };
   const run = (args, input) => spawnSync(process.execPath, [tsx, ...args], { cwd: root, env, input, encoding: 'utf8' });
   assert.equal(run(['apps/server/src/migrate.ts']).status, 0);
