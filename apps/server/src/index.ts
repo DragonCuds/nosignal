@@ -49,7 +49,17 @@ const app = Fastify({
 await app.register(fastifyCookie);
 await app.register(fastifyHelmet, {
   global: true,
-  hsts: config.isProduction ? undefined : false
+  hsts: config.isProduction ? undefined : false,
+  // Decrypted media (photos, GIFs, stickers, voice) is shown from blob: URLs made in the browser after the client
+  // decrypts it; without these, incoming media renders as an empty box. blob: is same-origin and script-created only.
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      'img-src': ["'self'", 'data:', 'blob:'],
+      'media-src': ["'self'", 'blob:'],
+      'connect-src': ["'self'", 'blob:']
+    }
+  }
 });
 // Text-like types only: ciphertext, event streams and video never compress.
 await app.register(fastifyCompress, {
