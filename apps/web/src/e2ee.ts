@@ -201,8 +201,14 @@ export const exportLocalIdentity = async (userId: string): Promise<BackupPayload
 };
 
 /** "Start fresh": the server forgets the old identity (password required), this browser makes a new one. */
-export const resetIdentity = async (userId: string, password: string): Promise<void> => {
-  await api.resetCryptoIdentity(password);
+export const resetIdentity = async (userId: string, password: string, secondFactor?: string): Promise<void> => {
+  const state = await api.cryptoBackup().catch((error: unknown) => {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  });
+  const revision = state?.revision ?? 0;
+  const { token } = await api.cryptoActionGrant('identity.reset', revision, password, secondFactor);
+  await api.resetCryptoIdentity(revision, token);
   const pair = await generateBackupablePair();
   const next: StoredIdentity = { userId, privateKey: await toExtractable(pair.privateJwk), publicKey: pair.publicJwk, fingerprint: await fingerprint(pair.publicJwk) };
   await dbPut(next);

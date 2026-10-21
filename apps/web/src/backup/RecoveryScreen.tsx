@@ -9,13 +9,13 @@ type Props = {
   /** Store the recovered identity (e2ee importIdentity) and open the app. */
   onRestored: (payload: BackupPayload, password?: string) => Promise<void>;
   /** Make a brand-new identity (needs the login password) and open the app. */
-  onFresh: (password: string) => Promise<void>;
+  onFresh: (password: string, secondFactor?: string) => Promise<void>;
   onLogout: () => void;
 };
 
 const errorText = (caught: unknown): string => {
   if (caught instanceof ApiError) {
-    if (caught.status === 403) return 'رمز عبور حساب درست نیست.';
+    if (caught.status === 403) return 'تأیید امنیتی انجام نشد. رمز عبور و کد دومرحله‌ای را بررسی کنید.';
     if (caught.status === 429) return 'تلاش‌های زیادی انجام شد. چند دقیقه بعد دوباره امتحان کنید.';
     if (caught.status === 0) return caught.message;
   }
@@ -33,6 +33,7 @@ export function RecoveryScreen({ userId, onRestored, onFresh, onLogout }: Props)
   const [file, setFile] = useState<File | null>(null);
   const [filePass, setFilePass] = useState('');
   const [freshPassword, setFreshPassword] = useState('');
+  const [freshSecondFactor, setFreshSecondFactor] = useState('');
   const [confirmFresh, setConfirmFresh] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
@@ -71,7 +72,7 @@ export function RecoveryScreen({ userId, onRestored, onFresh, onLogout }: Props)
   const startFresh = (event: FormEvent) => {
     event.preventDefault();
     if (!confirmFresh) { setMsg('برای ادامه، تیک تأیید را بزنید.'); return; }
-    void run(async () => { await onFresh(freshPassword); });
+    void run(async () => { await onFresh(freshPassword, freshSecondFactor || undefined); });
   };
 
   return (
@@ -110,13 +111,14 @@ export function RecoveryScreen({ userId, onRestored, onFresh, onLogout }: Props)
 
       <form className="group" onSubmit={startFresh}>
         <h3>{serverCopy === 'yes' ? '۳' : '۲'}. شروع تازه</h3>
-        <p className="group__lead">یک کلید جدید ساخته می‌شود؛ پیام‌های رمزنگاری‌شدهٔ قبلی برای همیشه ناخواناست و گفتگوهای قبلی از نو شروع می‌شوند.</p>
+        <p className="group__lead">یک کلید جدید ساخته می‌شود؛ پیام‌های رمزنگاری‌شدهٔ قبلی برای همیشه ناخواناست. پاک شدن کلید گفتگوهای مستقیم ممکن است بازیابی پیام‌های طرف مقابل را هم مختل کند.</p>
         <label className="field"><span>رمز عبور حساب (برای تأیید)</span>
           <input type="password" autoComplete="current-password" dir="ltr" value={freshPassword} onChange={(e) => setFreshPassword(e.target.value)} />
         </label>
+        <label className="field"><span>کد دومرحله‌ای یا بازیابی (اگر فعال است)</span><input autoComplete="one-time-code" dir="ltr" value={freshSecondFactor} onChange={(e) => setFreshSecondFactor(e.target.value)} /></label>
         <label className="backup-check">
           <input type="checkbox" checked={confirmFresh} onChange={(e) => setConfirmFresh(e.target.checked)} />
-          <span>می‌دانم که پیام‌های قبلی خوانده نمی‌شوند.</span>
+          <span>می‌دانم که پیام‌های قبلی برای من خوانده نمی‌شوند و ممکن است بازیابی طرف مقابل نیز مختل شود.</span>
         </label>
         <button className="button button--soft" type="submit" disabled={busy || !freshPassword}>شروع تازه</button>
       </form>

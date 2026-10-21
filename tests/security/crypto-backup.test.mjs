@@ -23,11 +23,12 @@ const fastifyCookie = serverRequire('@fastify/cookie');
 const fastifyRateLimit = serverRequire('@fastify/rate-limit');
 const { runMigrations } = await load('migrate.js');
 const { db } = await load('db.js');
-const { requireTrustedOrigin, requireUser, resetLoginAttempts } = await load('auth.js');
+const { requireTrustedOrigin, requireUser, resetLoginAttempts, tokenHash } = await load('auth.js');
 const { registerRegistration, resetRegistrationLimits } = await load('registration.js');
 const { registerCryptoRoutes } = await load('crypto.js');
 const { registerCryptoBackupRoutes } = await load('cryptoBackup.js');
 const { registerSecurityRoutes } = await load('security.js');
+const { totpForStep } = await load('totp.js');
 
 let app;
 let nextIp = 1;
@@ -41,9 +42,20 @@ const signup = async (username, password = 'correct-horse') => {
   return cookie;
 };
 const call = async (cookie, method, url, payload, ipOverride) => {
-  if (method === 'PUT' && url === '/api/crypto/backup' && passwords.has(cookie)) {
-    const state = await app.inject({ method: 'GET', url, headers: { origin, cookie }, remoteAddress: ip() });
-    payload = { ...payload, password: passwords.get(cookie), expectedRevision: state.statusCode === 404 ? 0 : state.json().revision };
+  if (passwords.has(cookie) && ((method === 'PUT' || method === 'DELETE') && url === '/api/crypto/backup' || method === 'POST' && url === '/api/crypto/identity/reset' && payload?.password)) {
+    const state = await app.inject({ method: 'GET', url: '/api/crypto/backup', headers: { origin, cookie }, remoteAddress: ip() });
+    const revision = state.statusCode === 404 ? 0 : state.json().revision;
+    const action = method === 'PUT' ? 'backup.replace' : method === 'DELETE' ? 'backup.delete' : 'identity.reset';
+    let token;
+    if (method !== 'PUT' || state.statusCode === 200 && (state.json().backup || state.json().mode === 'manual')) {
+      const grant = await app.inject({ method: 'POST', url: '/api/crypto/action-grant',
+        payload: { action, expectedRevision: revision, password: payload?.password ?? passwords.get(cookie) },
+        headers: { origin, cookie }, remoteAddress: ip() });
+      if (grant.statusCode !== 200) return grant;
+      token = grant.json().token;
+    }
+    payload = method === 'PUT' ? { ...payload, password: passwords.get(cookie), expectedRevision: revision, actionToken: token }
+      : { expectedRevision: revision, actionToken: token };
   }
   return app.inject({ method, url, payload, headers: { origin, cookie }, remoteAddress: ipOverride ?? ip() });
 };
@@ -122,6 +134,66 @@ test('DELETE removes the copy and records mode "manual"; PUT switches back to au
   assert.equal((await call(cookie, 'DELETE', '/api/crypto/backup')).statusCode, 204, 'idempotent');
   assert.equal((await call(cookie, 'PUT', '/api/crypto/backup', goodBlob())).statusCode, 204);
   assert.equal((await call(cookie, 'GET', '/api/crypto/backup')).json().mode, 'auto');
+});
+
+test('destructive backup actions need a matching one-use grant bound to this session, action and revision', async () => {
+  resetLoginAttempts();
+  const cookie = await signup('bk_grant', 'grant password');
+  const other = await signup('bk_grant_other', 'other password');
+  await call(cookie, 'PUT', '/api/crypto/backup', goodBlob());
+  await call(other, 'PUT', '/api/crypto/backup', goodBlob());
+  const revision = (await call(cookie, 'GET', '/api/crypto/backup')).json().revision;
+  const direct = (payload) => app.inject({ method: 'DELETE', url: '/api/crypto/backup', payload,
+    headers: { origin, cookie }, remoteAddress: ip() });
+  assert.equal((await direct({ expectedRevision: revision })).statusCode, 403, 'session alone cannot delete');
+  const grant = await call(cookie, 'POST', '/api/crypto/action-grant', { action: 'backup.delete', expectedRevision: revision, password: 'grant password' });
+  assert.equal(grant.statusCode, 200, grant.body);
+  const token = grant.json().token;
+  assert.equal((await app.inject({ method: 'POST', url: '/api/crypto/identity/reset', payload: { expectedRevision: revision, actionToken: token }, headers: { origin, cookie }, remoteAddress: ip() })).statusCode, 403);
+  assert.equal((await app.inject({ method: 'DELETE', url: '/api/crypto/backup', payload: { expectedRevision: revision, actionToken: token }, headers: { origin, cookie: other }, remoteAddress: ip() })).statusCode, 403);
+  const secondSession = 'tel_session=another-session-token';
+  await db.query("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES ($1, (SELECT id FROM users WHERE username = $2), $3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+1 day'))",
+    ['a1234567-1234-1234-1234-123456789abc', 'bk_grant', tokenHash('another-session-token')]);
+  assert.equal((await app.inject({ method: 'DELETE', url: '/api/crypto/backup', payload: { expectedRevision: revision, actionToken: token }, headers: { origin, cookie: secondSession }, remoteAddress: ip() })).statusCode, 403);
+  assert.equal((await direct({ expectedRevision: revision, actionToken: token })).statusCode, 204);
+  assert.equal((await direct({ expectedRevision: revision, actionToken: token })).statusCode, 409, 'used grant cannot be replayed');
+  const events = (await call(cookie, 'GET', '/api/crypto/security-events')).json();
+  assert.deepEqual(events.slice(0, 2).map((event) => event.action), ['backup.deleted', 'backup.created']);
+});
+
+test('expired grants and grants for another revision cannot erase the backup', async () => {
+  resetLoginAttempts();
+  const cookie = await signup('bk_grant_expiry', 'expiry password');
+  await call(cookie, 'PUT', '/api/crypto/backup', goodBlob());
+  const revision = (await call(cookie, 'GET', '/api/crypto/backup')).json().revision;
+  const grant = await call(cookie, 'POST', '/api/crypto/action-grant', { action: 'backup.delete', expectedRevision: revision, password: 'expiry password' });
+  assert.equal(grant.statusCode, 200);
+  const token = grant.json().token;
+  const stale = await app.inject({ method: 'DELETE', url: '/api/crypto/backup', payload: { expectedRevision: revision + 1, actionToken: token }, headers: { origin, cookie }, remoteAddress: ip() });
+  assert.equal(stale.statusCode, 409);
+  await db.query("UPDATE crypto_action_grants SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 second') WHERE user_id = (SELECT id FROM users WHERE username = $1)", ['bk_grant_expiry']);
+  const expired = await app.inject({ method: 'DELETE', url: '/api/crypto/backup', payload: { expectedRevision: revision, actionToken: token }, headers: { origin, cookie }, remoteAddress: ip() });
+  assert.equal(expired.statusCode, 403);
+  assert.ok((await call(cookie, 'GET', '/api/crypto/backup')).json().backup);
+});
+
+test('enabled MFA is required for identity reset authorization', async () => {
+  resetLoginAttempts();
+  const cookie = await signup('bk_grant_mfa', 'mfa password');
+  const setup = await call(cookie, 'POST', '/api/security/totp/setup', { password: 'mfa password' });
+  assert.equal(setup.statusCode, 200);
+  const secret = setup.json().secret;
+  const code = () => totpForStep(secret, Math.floor(Date.now() / 30_000));
+  const enabled = await call(cookie, 'POST', '/api/security/totp/enable', { code: code() });
+  assert.equal(enabled.statusCode, 200);
+  const missing = await call(cookie, 'POST', '/api/crypto/action-grant', { action: 'identity.reset', expectedRevision: 0, password: 'mfa password' });
+  assert.equal(missing.statusCode, 403);
+  const wrong = await call(cookie, 'POST', '/api/crypto/action-grant', { action: 'identity.reset', expectedRevision: 0, password: 'mfa password', secondFactor: '000000' });
+  assert.equal(wrong.statusCode, 403);
+  const valid = await call(cookie, 'POST', '/api/crypto/action-grant', { action: 'identity.reset', expectedRevision: 0, password: 'mfa password', secondFactor: enabled.json().recoveryCodes[0] });
+  assert.equal(valid.statusCode, 200, valid.body);
+  const reset = await app.inject({ method: 'POST', url: '/api/crypto/identity/reset', payload: { expectedRevision: 0, actionToken: valid.json().token }, headers: { origin, cookie }, remoteAddress: ip() });
+  assert.equal(reset.statusCode, 204, reset.body);
 });
 
 test('identity reset needs the right password, clears identity + envelopes + stored blob, keeps the mode', async () => {

@@ -17,9 +17,9 @@ export const fetchServerBackup = async (): Promise<ServerBackupState> => {
 
 const samePublic = (a: JsonWebKey, b: JsonWebKey) => a.x === b.x && a.y === b.y;
 
-export const uploadBackup = async (payload: BackupPayload, password: string): Promise<void> => {
+export const uploadBackup = async (payload: BackupPayload, password: string, actionToken?: string): Promise<void> => {
   const remote = await fetchServerBackup();
-  await api.putCryptoBackup(await wrapForServer(payload, password), password, remote?.revision ?? 0);
+  await api.putCryptoBackup(await wrapForServer(payload, password), password, remote?.revision ?? 0, actionToken);
 };
 
 // ---- "Not saved yet" tracking ------------------------------------------------------------------------

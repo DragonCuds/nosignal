@@ -15,7 +15,7 @@ type Props = {
 
 const errorText = (e: unknown): string => {
   if (e instanceof ApiError) {
-    if (e.status === 403) return 'رمز عبور حساب درست نیست.';
+    if (e.status === 403) return 'تأیید امنیتی انجام نشد. رمز عبور و کد دومرحله‌ای را بررسی کنید.';
     if (e.status === 429) return 'تلاش‌های زیادی انجام شد. چند دقیقه بعد دوباره امتحان کنید.';
     return e.message;
   }
@@ -67,6 +67,9 @@ export function Backup({ userId, getBackup, onImport }: Props) {
   const [step, setStep] = useState<'idle' | 'to-power' | 'to-auto'>('idle');
   const [saved, setSaved] = useState(false);
   const [password, setPassword] = useState('');
+  const [secondFactor, setSecondFactor] = useState('');
+  const [totpEnabled, setTotpEnabled] = useState(false);
+  const [events, setEvents] = useState<Array<{ action: string; createdAt: string }>>([]);
   const [recoveryText, setRecoveryText] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [filePass, setFilePass] = useState('');
@@ -76,6 +79,8 @@ export function Backup({ userId, getBackup, onImport }: Props) {
   const refresh = useCallback(async () => {
     try { setServer(await fetchServerBackup()); } catch { setServer(null); }
     try { setPayload(await getBackup()); } catch { setPayload(null); }
+    try { setTotpEnabled((await api.securityStatus()).totpEnabled); } catch { /* keep existing state */ }
+    try { setEvents(await api.cryptoSecurityEvents()); } catch { /* activity is optional when offline */ }
   }, [getBackup]);
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -89,9 +94,12 @@ export function Backup({ userId, getBackup, onImport }: Props) {
 
   const enablePower = () => task(async () => {
     if (!saved) throw new Error('اول تیک «کلید را ذخیره کردم» را بزنید.');
-    await api.deleteCryptoBackup();
+    const current = await fetchServerBackup();
+    const revision = current?.revision ?? 0;
+    const { token } = await api.cryptoActionGrant('backup.delete', revision, password, secondFactor);
+    await api.deleteCryptoBackup(revision, token);
     markBackedUp(userId);
-    setStep('idle'); setSaved(false);
+    setStep('idle'); setSaved(false); setPassword(''); setSecondFactor('');
     await refresh();
     setMsg('حالت امنیت بیشتر روشن شد. نسخهٔ سرور پاک شد؛ کلید بازیابی را جای امنی نگه دارید.');
   });
@@ -101,9 +109,10 @@ export function Backup({ userId, getBackup, onImport }: Props) {
     void task(async () => {
       const current = payload === 'loading' ? null : payload;
       if (!current) throw new Error('کلید این دستگاه قابل پشتیبان‌گیری نیست.');
-      await api.checkPassword(password); // wrong password -> 403, nothing is stored
-      await uploadBackup(current, password);
-      setPassword(''); setStep('idle');
+      const remote = await fetchServerBackup();
+      const { token } = await api.cryptoActionGrant('backup.replace', remote?.revision ?? 0, password, secondFactor);
+      await uploadBackup(current, password, token);
+      setPassword(''); setSecondFactor(''); setStep('idle');
       await refresh();
       setMsg('حالت خودکار روشن شد و نسخهٔ قفل‌شده روی سرور ذخیره شد.');
     });
@@ -146,8 +155,10 @@ export function Backup({ userId, getBackup, onImport }: Props) {
               <p><strong>حالت امنیت بیشتر:</strong> نسخهٔ سرور پاک می‌شود و فقط خودتان با «کلید بازیابی» می‌توانید پیام‌های قبلی را در دستگاه جدید باز کنید. اگر آن را گم کنید، هیچ‌کس نمی‌تواند کمکتان کند و پیام‌های قبلی برای همیشه ناخواناست. اول کلید را ذخیره کنید:</p>
               <RecoveryExport userId={userId} payload={payload} />
               <label className="backup-check"><input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} /><span>کلید بازیابی را جای امنی ذخیره کردم.</span></label>
+              <label className="field"><span>رمز عبور حساب</span><input type="password" autoComplete="current-password" dir="ltr" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
+              {totpEnabled && <label className="field"><span>کد دومرحله‌ای یا بازیابی</span><input autoComplete="one-time-code" dir="ltr" value={secondFactor} onChange={(e) => setSecondFactor(e.target.value)} /></label>}
               <div className="group__actions">
-                <button className="button button--primary" type="button" disabled={busy || !saved} onClick={() => void enablePower()}>پاک کردن نسخهٔ سرور و روشن کردن</button>
+                <button className="button button--primary" type="button" disabled={busy || !saved || !password || (totpEnabled && !secondFactor)} onClick={() => void enablePower()}>پاک کردن نسخهٔ سرور و روشن کردن</button>
                 <button className="text-button" type="button" onClick={() => { setStep('idle'); setSaved(false); }}>انصراف</button>
               </div>
             </div>
@@ -166,8 +177,9 @@ export function Backup({ userId, getBackup, onImport }: Props) {
                 <label className="field"><span>رمز عبور حساب</span>
                   <input type="password" autoComplete="current-password" dir="ltr" value={password} onChange={(e) => setPassword(e.target.value)} />
                 </label>
+                {totpEnabled && <label className="field"><span>کد دومرحله‌ای یا بازیابی</span><input autoComplete="one-time-code" dir="ltr" value={secondFactor} onChange={(e) => setSecondFactor(e.target.value)} /></label>}
                 <div className="group__actions">
-                  <button className="button button--primary" type="submit" disabled={busy || !password || !exportable}>روشن کردن حالت خودکار</button>
+                  <button className="button button--primary" type="submit" disabled={busy || !password || !exportable || (totpEnabled && !secondFactor)}>روشن کردن حالت خودکار</button>
                   <button className="text-button" type="button" onClick={() => { setStep('idle'); setPassword(''); }}>انصراف</button>
                 </div>
               </form>
@@ -188,6 +200,7 @@ export function Backup({ userId, getBackup, onImport }: Props) {
           <button className="button button--soft" type="submit" disabled={busy}>بازیابی کلید</button>
         </form>
       </details>
+      {events.length > 0 && <details className="group__box"><summary>فعالیت امنیتی پشتیبان</summary><ul className="list">{events.map((event, index) => <li key={`${event.createdAt}-${index}`}><span>{({ 'backup.created': 'ساخت پشتیبان', 'backup.replaced': 'جایگزینی پشتیبان', 'backup.deleted': 'حذف پشتیبان', 'identity.reset': 'بازنشانی هویت' } as Record<string, string>)[event.action] ?? event.action}<small>{new Date(event.createdAt).toLocaleString('fa-IR')}</small></span></li>)}</ul></details>}
       {msg && <div className="group__notice" role="status">{msg}</div>}
     </section>
   );

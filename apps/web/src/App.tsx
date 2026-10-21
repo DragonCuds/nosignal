@@ -220,8 +220,8 @@ function Messenger({ initialChatId, user, theme, onToggleTheme, onLogout }: Mess
         userId={user.id}
         onLogout={onLogout}
         onRestored={async (payload) => { await importIdentity(payload); await startEncryption(); }}
-        onFresh={async (password) => {
-          await resetIdentity(user.id, password);
+        onFresh={async (password, secondFactor) => {
+          await resetIdentity(user.id, password, secondFactor);
           try {
             const payload = await getBackup();
             if (payload && (await fetchServerBackup())?.mode !== 'manual') await uploadBackup(payload, password);
