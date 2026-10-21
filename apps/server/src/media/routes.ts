@@ -9,6 +9,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { requireUser } from '../auth.js';
 import { db } from '../db.js';
 import { importStickerPack } from './import-pack.js';
+import { getTelegramImport, publicJob, startTelegramImport, telegramImportEnabled } from './telegram-import.js';
 import { assertQuota, contentPath, ensureStorage, mediaDir, mediaUrl, moveContent, QuotaError, removeUnreferencedFiles, temporaryPath } from './storage.js';
 import { probeMedia } from './validation.js';
 
@@ -192,6 +193,20 @@ export const registerMediaRoutes = async (app: FastifyInstance): Promise<void> =
       return reply.code(201).send(pack);
     } catch (error) { return reply.code(errorStatus(error)).send(errorBody(error, 'Unable to import pack'));
     } finally { if (upload) await rm(upload.tempPath, { force: true }); }
+  });
+
+  app.get('/api/stickers/import/telegram/status', { preHandler: requireUser, config: { rateLimit: MEDIA_READ_RATE_LIMIT } }, async () => ({ enabled: telegramImportEnabled() }));
+
+  app.post<{ Body: { pack?: unknown } }>('/api/stickers/import/telegram', { preHandler: requireUser, config: { rateLimit: MEDIA_WRITE_RATE_LIMIT } }, async (request, reply) => {
+    const started = startTelegramImport(request.user!.id, request.body?.pack, (message) => request.log.error(message));
+    if (!started.ok) return reply.code(started.status).send({ error: started.code, code: started.code });
+    return reply.code(202).send(publicJob(started.job));
+  });
+
+  app.get<{ Params: { id: string } }>('/api/stickers/import/telegram/:id', { preHandler: requireUser, config: { rateLimit: MEDIA_READ_RATE_LIMIT } }, async (request, reply) => {
+    const job = getTelegramImport(request.user!.id, request.params.id);
+    if (!job) return reply.code(404).send({ error: 'not_found', code: 'not_found' });
+    return publicJob(job);
   });
 
   app.get('/api/media/packs', { preHandler: requireUser, config: { rateLimit: MEDIA_READ_RATE_LIMIT } }, async (request) => {

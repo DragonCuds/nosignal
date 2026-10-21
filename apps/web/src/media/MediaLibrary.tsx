@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { MAX_GIFS, MAX_PACKS, mediaApi, type Gif, type Pack } from './mediaApi.js';
+import { TelegramImport, useMediaAdd } from './useMediaAdd.js';
 
 /** Settings section «استیکرها و گیف‌های من»: manage own sticker packs, uploaded and saved GIFs. */
 export function MediaLibrary() {
@@ -8,10 +9,7 @@ export function MediaLibrary() {
   const [saved, setSaved] = useState<Gif[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<string | null>(null); // item id being deleted
-  const [progress, setProgress] = useState<{ kind: 'pack' | 'gif'; pct: number } | null>(null);
   const [confirm, setConfirm] = useState<{ kind: 'pack' | 'gif' | 'unsave'; id: string; name: string } | null>(null);
-  const packInput = useRef<HTMLInputElement>(null);
-  const gifInput = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -39,15 +37,9 @@ export function MediaLibrary() {
     } catch (e) { setError(e instanceof Error ? e.message : 'حذف نشد.'); } finally { setBusy(null); }
   };
 
-  const pick = async (kind: 'pack' | 'gif', file: File | undefined) => {
-    if (!file) return;
-    setError(''); setProgress({ kind, pct: 0 });
-    try {
-      const onP = (pct: number) => setProgress({ kind, pct });
-      if (kind === 'pack') await mediaApi.importPack(file, onP); else await mediaApi.uploadGif(file, onP);
-      await load();
-    } catch (e) { setError(e instanceof Error ? e.message : 'آپلود نشد.'); } finally { setProgress(null); }
-  };
+  const add = useMediaAdd(load);
+  const { progress } = add;
+  const [showTg, setShowTg] = useState(false);
 
   const loading = packs === null || gifs === null;
   const fa = (n: number) => n.toLocaleString('fa-IR');
@@ -58,13 +50,15 @@ export function MediaLibrary() {
       <p className="media-lib__usage" role="status">
         بسته‌ها {fa(packs?.length ?? 0)} از {fa(MAX_PACKS)} · گیف‌ها {fa(gifs?.length ?? 0)} از {fa(MAX_GIFS)}
       </p>
-      {error && <p className="media-lib__error" role="alert">{error}</p>}
+      {(error || add.error) && <p className="media-lib__error" role="alert">{error || add.error}</p>}
 
       <div className="media-lib__head">
         <h3>بسته‌های استیکر</h3>
-        <button type="button" className="media-lib__btn" disabled={!!progress} onClick={() => packInput.current?.click()}>وارد کردن بسته (zip)</button>
-        <input ref={packInput} type="file" accept=".zip,application/zip" hidden onChange={(e) => { void pick('pack', e.target.files?.[0]); e.target.value = ''; }} />
+        <button type="button" className="media-lib__btn" disabled={add.busy} onClick={add.openPack}>وارد کردن بسته (zip)</button>
+        <button type="button" className="media-lib__btn" disabled={add.busy} aria-expanded={showTg} onClick={() => setShowTg((v) => !v)}>افزودن بسته از تلگرام</button>
+        {add.inputs}
       </div>
+      {showTg && <TelegramImport add={add} showError={false} />}
       {progress?.kind === 'pack' && <Progress pct={progress.pct} />}
       {loading ? <p className="media-lib__empty">در حال بارگذاری…</p>
         : packs.length === 0 ? <p className="media-lib__empty">هنوز بسته‌ی استیکری ندارید. یک فایل zip استیکر وارد کنید.</p>
@@ -82,8 +76,7 @@ export function MediaLibrary() {
 
       <div className="media-lib__head">
         <h3>گیف‌های آپلودشده</h3>
-        <button type="button" className="media-lib__btn" disabled={!!progress} onClick={() => gifInput.current?.click()}>آپلود گیف</button>
-        <input ref={gifInput} type="file" accept=".gif,.mp4,image/gif,video/mp4" hidden onChange={(e) => { void pick('gif', e.target.files?.[0]); e.target.value = ''; }} />
+        <button type="button" className="media-lib__btn" disabled={add.busy} onClick={add.openGif}>آپلود گیف</button>
       </div>
       {progress?.kind === 'gif' && <Progress pct={progress.pct} />}
       {loading ? null : uploaded.length === 0 ? <p className="media-lib__empty">هنوز گیفی آپلود نکرده‌اید.</p>

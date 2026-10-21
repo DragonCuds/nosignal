@@ -57,8 +57,8 @@
 .gif-grid button:active { transform: scale(.96); }
 .gif-grid video { display: block; height: 100%; inset: 0; object-fit: cover; position: absolute; width: 100%; }
 .gif-grid button > span { background: var(--media-meta); border-radius: 7px; bottom: 4px; color: #fff; direction: ltr; font: 700 9px/14px system-ui, sans-serif; inset-inline-start: 4px; padding-inline: 4px; position: absolute; }
-.gif-content > .panel-state:not(.panel-state--overlay) { inset: 84px 0 0; position: absolute; }
-.panel-state--overlay { background: color-mix(in srgb, var(--surface) 70%, transparent); inset: 84px 0 0; position: absolute; z-index: 2; }
+.gif-content > .panel-state:not(.panel-state--overlay) { inset: 110px 0 0; position: absolute; }
+.panel-state--overlay { background: color-mix(in srgb, var(--surface) 70%, transparent); inset: 110px 0 0; position: absolute; z-index: 2; }
 
 .media-tabs { align-items: center; background: var(--surface-2); display: flex; flex: 0 0 44px; height: 44px; justify-content: space-around; position: relative; }
 .media-tabs::after { background: linear-gradient(var(--accent), var(--accent)) center bottom / 28px 3px no-repeat; border-radius: 2px; bottom: 0; content: ''; height: 3px; inset-inline-start: 0; position: absolute; transform: translateX(calc(var(--i, 0) * -100%)); transition: transform .28s var(--ease-spring); width: calc(100% / 3); will-change: transform; }
@@ -83,3 +83,16 @@
 }
 
 @media (prefers-reduced-motion: reduce) { .media-tabs::after { transition: none; } .sticker-panel__content > * { animation: none; } }
+
+/* "Add" shortcuts inside the picker */
+.panel-add { display: flex; flex: none; flex-wrap: wrap; gap: 6px; padding: 0 8px 4px; }
+.panel-add button, .gif-filter .gif-filter__add { align-items: center; background: var(--accent-soft); border: 0; border-radius: 12px; color: var(--accent); cursor: pointer; display: inline-flex; font: inherit; font-size: 13px; font-weight: 500; gap: 4px; min-height: 44px; padding-inline: 12px; touch-action: manipulation; }
+.panel-add button:disabled, .gif-filter .gif-filter__add:disabled { opacity: .5; }
+.panel-add svg, .gif-filter__add svg { flex: none; height: 18px; width: 18px; }
+.gif-filter { align-items: center; flex-wrap: wrap; }
+.gif-filter .gif-filter__add { height: 44px; margin-inline-end: auto; }
+.panel-add--big { justify-content: center; padding: 0; }
+.panel-state .panel-add--big { margin-top: 4px; }
+.panel-tg { flex: none; padding: 0 8px 6px; }
+.panel-add__bar { flex: none; margin: 0 8px 6px; }
+.panel-add__err { flex: none; margin: 0 8px 6px; }

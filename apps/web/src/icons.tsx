@@ -13,6 +13,7 @@ export const ComposeIcon = (props: IconProps) => <Icon {...props}><path d="M13.7
 export const SunIcon = (props: IconProps) => <Icon {...props}><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></Icon>;
 export const MoonIcon = (props: IconProps) => <Icon {...props}><path d="M20.2 15.2A8.7 8.7 0 0 1 8.8 3.8 8.7 8.7 0 1 0 20.2 15.2Z"/></Icon>;
 export const LogoutIcon = (props: IconProps) => <Icon {...props}><path d="M10 5H5v14h5M14 8l4 4-4 4M8 12h10"/></Icon>;
+export const PlusIcon = (props: IconProps) => <Icon {...props}><path d="M12 5v14M5 12h14"/></Icon>;
 export const CloseIcon = (props: IconProps) => <Icon {...props}><path d="m6 6 12 12M18 6 6 18"/></Icon>;
 export const ChevronIcon = (props: IconProps) => <Icon {...props}><path d="m9 5 7 7-7 7"/></Icon>;
 export const ChatIcon = (props: IconProps) => <Icon {...props}><path d="M20 11.5a7.5 7.5 0 0 1-8 7.5 8.7 8.7 0 0 1-3.1-.6L4 20l1.7-4.3A7.9 7.9 0 1 1 20 11.5Z"/><path d="M8.5 10.5h7M8.5 14h4.5"/></Icon>;

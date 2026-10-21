@@ -28,3 +28,11 @@
 .media-lib__dialog { background: var(--surface); border-radius: 16px; padding: 18px; width: min(360px, 100%); display: grid; gap: 14px; }
 .media-lib__dialog p { margin: 0; }
 .media-lib__actions { display: flex; gap: 8px; justify-content: flex-start; }
+
+/* Telegram pack import form (settings + composer picker) */
+.tg-import { display: grid; gap: 8px; grid-template-columns: 1fr auto; }
+.tg-import__input { background: var(--surface-2); border: 0; border-radius: 12px; color: var(--text); font: inherit; font-size: 15px; min-height: 44px; min-width: 0; outline: 0; padding: 0 12px; }
+.tg-import__input:focus { box-shadow: 0 0 0 2px var(--accent); }
+.tg-import__go { min-height: 44px; }
+.tg-import__bar, .tg-import__ok, .tg-import__err { grid-column: 1 / -1; }
+.tg-import__ok { background: var(--accent-soft); border-radius: 12px; color: var(--accent); font-size: 14px; margin: 0; padding: 10px 12px; }

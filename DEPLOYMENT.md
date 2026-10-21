@@ -44,6 +44,16 @@ It prompts for a password (use a long one). Without `--admin` the same command c
 
 `OPEN_REGISTRATION` (in `.env`, default off) controls public signup. Off: accounts are created only by the CLI or by invite links. `1`/`true`: anyone can register at `/api/register` with an ID (3-32 chars of `a-z 0-9 _`) and a password of at least 8 characters; registration is rate-limited per IP and new users are never admins. Invites keep working in both modes. Set `TRUSTED_ORIGINS` (for example `https://tel.example.com`) and `WEBAUTHN_RP_ID` (`tel.example.com`) to your real domain before exposing the service.
 
+## Telegram sticker import (optional)
+
+Users can paste a `t.me/addstickers/NAME` link in the sticker picker to copy a Telegram sticker pack into their own library. It uses a bot owned by the operator and is completely off until you set a token (the UI then says the operator has not configured the Telegram bot).
+
+1. Create a bot with @BotFather (`/newbot`) and copy its token.
+2. Put `TELEGRAM_BOT_TOKEN=<token>` in the server env file and restart the service.
+3. The server must reach `api.telegram.org`. Where Telegram is blocked, set `TELEGRAM_API_BASE` to a mirror/reverse proxy, or (Node 24) set `NODE_USE_ENV_PROXY=1` and `HTTPS_PROXY=http://host:port` in the same file.
+
+The token never leaves the server (it is not sent to clients, logged, or included in errors) and users never talk to the bot. Limits: 120 stickers per pack, 512 KB per file, 5 imports per user per hour, 60 s per import; static `.webp`, animated `.tgs` and video `.webm` stickers are stored as-is under the usual sticker rules. Re-importing a pack adds only missing stickers. Sticker artwork belongs to its creators; the feature is meant for personal use, and Telegram's terms apply.
+
 ## Moving an existing PostgreSQL installation
 
 Stop writers, restore a `pg_dump` into a throw-away PostgreSQL database, then run the converter against that copy. Never point migration testing at the live database.
