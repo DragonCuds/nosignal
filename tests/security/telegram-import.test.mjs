@@ -20,6 +20,8 @@ process.env.NODE_ENV = 'test';
 process.env.DATA_DIR = dataDir;
 process.env.SESSION_SECRET = 'tg-import-test-secret-with-at-least-32-bytes';
 process.env.TRUSTED_ORIGINS = origin;
+// The fake Bot API below is plain HTTP on loopback, which needs the explicit NS-13 opt-in.
+process.env.TELEGRAM_API_ALLOW_LOCAL_HTTP = '1';
 
 const load = (name) => import(path.join(dist, name));
 const serverRequire = createRequire(path.join(root, 'apps/server/package.json'));
@@ -29,7 +31,7 @@ const fastifyRateLimit = serverRequire('@fastify/rate-limit');
 const { db } = await load('db.js');
 const { createUser } = await load('users.js');
 const { createSession, requireTrustedOrigin } = await load('auth.js');
-const { redact, parsePackName } = await load('media/telegram-import.js');
+const { redact, parsePackName, telegramImportEnabled } = await load('media/telegram-import.js');
 
 // ---- fixtures + fake Bot API ----
 const webp = (color) => { if (skipNoFfmpeg) return Buffer.alloc(0); const f = path.join(work, `${color}.webp`); execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=0x${color}:s=512x256`, '-frames:v', '1', f]); return readFile(f); };
@@ -103,7 +105,7 @@ before(async () => {
   }
 });
 after(async () => {
-  delete process.env.TELEGRAM_BOT_TOKEN;
+  delete process.env.TELEGRAM_BOT_TOKEN; delete process.env.TELEGRAM_API_ALLOW_LOCAL_HTTP; delete process.env.TELEGRAM_API_BASE;
   await app.close(); await db.end(); await new Promise((r) => fake.close(r));
   await rm(dataDir, { recursive: true, force: true }); await rm(work, { recursive: true, force: true });
 });
@@ -133,6 +135,46 @@ test('auth, origin and invalid links are rejected', async () => {
     assert.equal(r.statusCode, 400); assert.equal(r.json().code, 'invalid_pack');
   }
   assert.deepEqual((await send('GET', '/api/stickers/import/telegram/status', { user: 'alice' })).json(), { enabled: true });
+});
+
+test('NS-13: plain-HTTP Bot API base is only accepted for opted-in literal loopback', () => {
+  const warnings = []; const originalWarn = console.warn;
+  console.warn = (...args) => { warnings.push(args.join(' ')); };
+  const saved = { token: process.env.TELEGRAM_BOT_TOKEN, base: process.env.TELEGRAM_API_BASE, allow: process.env.TELEGRAM_API_ALLOW_LOCAL_HTTP };
+  const enabled = (base, allow) => {
+    process.env.TELEGRAM_BOT_TOKEN = TOKEN;
+    if (base === undefined) delete process.env.TELEGRAM_API_BASE; else process.env.TELEGRAM_API_BASE = base;
+    if (allow === undefined) delete process.env.TELEGRAM_API_ALLOW_LOCAL_HTTP; else process.env.TELEGRAM_API_ALLOW_LOCAL_HTTP = allow;
+    return telegramImportEnabled();
+  };
+  try {
+    // HTTPS keeps working, with or without the opt-in, and so does the default.
+    assert.equal(enabled('https://api.telegram.org', undefined), true);
+    assert.equal(enabled(undefined, undefined), true);
+    assert.equal(enabled('https://mirror.example.com/tg', '1'), true);
+    // Remote or named HTTP is never accepted, even with the opt-in.
+    assert.equal(enabled('http://api.example.com', undefined), false);
+    assert.equal(enabled('http://api.example.com', '1'), false);
+    // Loopback HTTP needs the opt-in (exactly "1").
+    assert.equal(enabled('http://127.0.0.1:8081', undefined), false);
+    assert.equal(enabled('http://127.0.0.1:8081', '0'), false);
+    assert.equal(enabled('http://127.0.0.1:8081', 'true'), false);
+    assert.equal(enabled('http://127.0.0.1:8081', '1'), true);
+    assert.equal(enabled('http://127.5.6.7:8081/botapi', '1'), true);
+    assert.equal(enabled('http://[::1]:8081', '1'), true);
+    assert.equal(enabled('http://[::1]:8081', undefined), false);
+    // Names (even localhost), private ranges and look-alikes are rejected with the opt-in.
+    for (const bad of ['http://localhost:8081', 'http://10.0.0.5', 'http://192.168.1.10:8081', 'http://0.0.0.0:8081', 'http://127.0.0.1.evil.example', 'http://[::ffff:7f00:1]:8081', 'http://[::2]:8081', 'http://169.254.169.254', 'ftp://127.0.0.1', 'http://user:pw@127.0.0.1:8081'])
+      assert.equal(enabled(bad, '1'), false, bad);
+    // The refusal is logged without the token or the configured URL.
+    assert.ok(warnings.length > 0);
+    assert.ok(warnings.every((line) => !line.includes('FAKE_test_token') && !line.includes(TOKEN) && !line.includes('pw@') && !line.includes('evil.example')), warnings.join('\n'));
+  } finally {
+    console.warn = originalWarn;
+    for (const [key, value] of [['TELEGRAM_BOT_TOKEN', saved.token], ['TELEGRAM_API_BASE', saved.base], ['TELEGRAM_API_ALLOW_LOCAL_HTTP', saved.allow]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
 });
 
 test('imports static, animated and video stickers into the user library', { skip: skipNoFfmpeg }, async () => {

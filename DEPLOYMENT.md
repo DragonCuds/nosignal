@@ -50,7 +50,8 @@ Users can paste a `t.me/addstickers/NAME` link in the sticker picker to copy a T
 
 1. Create a bot with @BotFather (`/newbot`) and copy its token.
 2. Put `TELEGRAM_BOT_TOKEN=<token>` in the server env file and restart the service.
-3. The server must reach `api.telegram.org`. Where Telegram is blocked, set `TELEGRAM_API_BASE` to a mirror/reverse proxy, or (Node 24) set `NODE_USE_ENV_PROXY=1` and `HTTPS_PROXY=http://host:port` in the same file.
+3. The server must reach `api.telegram.org`. Where Telegram is blocked, set `TELEGRAM_API_BASE` to a mirror/reverse proxy (it must be `https:`), or (Node 24) set `NODE_USE_ENV_PROXY=1` and `HTTPS_PROXY=http://host:port` in the same file.
+   `TELEGRAM_API_BASE` accepts `https:` only. The bot token travels in the request URL, so plain `http:` is refused (the import stays off and one warning without the token is logged). The one exception is a local Telegram Bot API server on the same machine: set `TELEGRAM_API_ALLOW_LOCAL_HTTP=1` and use a literal loopback address such as `http://127.0.0.1:8081` or `http://[::1]:8081`. Host names (including `localhost`) and other addresses are never accepted over `http:`, because name resolution can change.
 
 The token never leaves the server (it is not sent to clients, logged, or included in errors) and users never talk to the bot. Limits: 120 stickers per pack, 512 KB per file, 5 imports per user per hour, 60 s per import; static `.webp`, animated `.tgs` and video `.webm` stickers are stored as-is under the usual sticker rules. Re-importing a pack adds only missing stickers. Sticker artwork belongs to its creators; the feature is meant for personal use, and Telegram's terms apply.
 

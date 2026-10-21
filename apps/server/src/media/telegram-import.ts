@@ -31,15 +31,30 @@ class ImportError extends Error {
   constructor(readonly code: ImportCode) { super(code); }
 }
 
+const warned = new Set<string>();
+/** One fixed, token-free warning line per reason (botConfig runs on every request). */
+const warnOnce = (reason: string): void => {
+  if (warned.has(reason)) return;
+  warned.add(reason);
+  console.warn(`[telegram-import] disabled: ${reason}`);
+};
+
+/** Only literal loopback addresses (127.0.0.0/8, ::1). Names such as "localhost" are rejected: their resolution can change. */
+const isLoopbackHost = (hostname: string): boolean => /^127(\.\d{1,3}){3}$/.test(hostname) || hostname === '[::1]' || hostname === '::1';
+
 const botConfig = (): { token: string; base: string } | null => {
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
   if (!token || !/^\d{3,}:[A-Za-z0-9_-]{10,}$/.test(token)) return null;
   let base = (process.env.TELEGRAM_API_BASE?.trim() || 'https://api.telegram.org').replace(/\/+$/, '');
   try {
     const url = new URL(base);
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return null;
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) { warnOnce('TELEGRAM_API_BASE is not a plain http(s) URL'); return null; }
+    if (url.protocol === 'http:') {
+      if (process.env.TELEGRAM_API_ALLOW_LOCAL_HTTP !== '1') { warnOnce('TELEGRAM_API_BASE uses http: (set TELEGRAM_API_ALLOW_LOCAL_HTTP=1 only for a loopback Bot API server)'); return null; }
+      if (!isLoopbackHost(url.hostname)) { warnOnce('http: TELEGRAM_API_BASE is allowed only for a literal loopback address (127.x.x.x or [::1])'); return null; }
+    }
     base = url.origin + (url.pathname === '/' ? '' : url.pathname.replace(/\/+$/, ''));
-  } catch { return null; }
+  } catch { warnOnce('TELEGRAM_API_BASE is not a valid URL'); return null; }
   return { token, base };
 };
 
