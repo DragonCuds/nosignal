@@ -30,6 +30,8 @@ Authentication cookies are `Secure`, `HttpOnly`, and `SameSite=Strict`, so produ
 
 The health endpoint is intentionally unauthenticated and returns only service status. Monitor it through loopback or a restricted monitoring path; it does not prove database health.
 
+Presence events (online and last seen) are sent only to current members of a two-person direct chat whom that user has messaged. Creating a chat or adding someone to a group does not grant presence access. Deleting the user's last active message to a recipient or removing that recipient from the chat ends access on the next presence event. Presence is not shown to group or channel members through membership alone.
+
 ## End-to-end encryption and its boundary
 
 New direct-chat and Saved Messages content is encrypted in the browser before upload. The client keeps a
@@ -96,5 +98,6 @@ There is no "forgot password" flow and no admin tool to reset a user's password.
 - **حالت امنیت بیشتر (اختیاری، از تنظیمات):** نسخهٔ سرور پاک می‌شود و فقط شما با «کلید بازیابی» یا فایل پشتیبان می‌توانید پیام‌های قبلی را در دستگاه جدید باز کنید. مدیر سرور هیچ راهی ندارد؛ ولی اگر کلید بازیابی گم شود، پیام‌های قبلی برای همیشه از دست می‌روند.
 - «شروع تازه» یک کلید جدید می‌سازد؛ پیام‌های رمزشدهٔ قبلی در آن گفتگوها برای هر دو طرف ناخواناست.
 - ثبت‌نام باز به‌طور پیش‌فرض خاموش است (`OPEN_REGISTRATION`) و ثبت‌نام و ورود محدودیت تعداد تلاش دارند.
+- رویدادهای حضور (آنلاین و آخرین بازدید) فقط به مخاطبی در گفت‌وگوی مستقیم دونفره می‌رسند که خود کاربر قبلاً برای او پیام فعال فرستاده باشد. ساخت یک‌طرفهٔ گفتگو یا عضویت گروه، مجوز دیدن حضور ایجاد نمی‌کند.
 - گزارش آسیب‌پذیری: از بخش «Report a vulnerability» (Private advisories) در صفحهٔ GitHub پروژه استفاده کنید؛ لطفاً مشکل را عمومی منتشر نکنید.
 

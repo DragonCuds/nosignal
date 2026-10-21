@@ -79,6 +79,9 @@ test('SSE stream + WS ping/pong + typing + presence + keepalive', async () => {
   await sleep(400);
   const got = wsMsgs.filter((m) => m.type === 'typing').length - n0;
   assert.ok(got > 0 && got < 40, `typing rate-limited, got ${got} of 40`);
+  // Bob must message Alice before Alice is allowed to see Bob's presence.
+  const bobMessage = await call('bob', 'POST', `/api/chats/${chat.id}/messages`, { kind: 'text', encrypted: { version: 2, cipherId: crypto.randomUUID(), nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'B'.repeat(40) } });
+  assert.equal(bobMessage.status, 201);
   // presence: bob's SSE closes -> alice's WS sees offline
   bob.req.destroy(); await sleep(400);
   assert.equal(wsMsgs.filter((m) => m.type === 'presence' && m.userId === '2').pop()?.online, false);
