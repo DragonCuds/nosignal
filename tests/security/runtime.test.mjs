@@ -71,6 +71,7 @@ before(async () => {
       NODE_ENV: 'production',
       PORT: String(port),
       TRUSTED_ORIGINS: 'https://messenger.example',
+      OPEN_REGISTRATION: '1',
       DATA_DIR: dataDir,
       SESSION_SECRET: 'security-test-only-secret-with-at-least-32-bytes'
     },
@@ -125,6 +126,46 @@ test('state-changing API requests require an exact trusted Origin', async () => 
     body: '{}'
   });
   assert.equal(trusted.status, 400);
+});
+
+test('login gives the same error and runs password verification for existing and missing users', async () => {
+  const origin = 'https://messenger.example';
+  const url = `http://${host}:${port}`;
+  const headers = { 'content-type': 'application/json', origin };
+  const username = 'timing_test_user';
+  const password = 'correct horse battery staple';
+  const registered = await fetch(`${url}/api/register`, {
+    method: 'POST', headers, body: JSON.stringify({ username, password })
+  });
+  assert.equal(registered.status, 204);
+
+  const attempt = async (name) => {
+    const start = process.hrtime.bigint();
+    const response = await fetch(`${url}/api/auth/login`, {
+      method: 'POST', headers, body: JSON.stringify({ username: name, password: 'wrong password!!' })
+    });
+    const body = await response.text();
+    return { status: response.status, body, ms: Number(process.hrtime.bigint() - start) / 1e6 };
+  };
+
+  // Warm both paths, then interleave samples to reduce drift. The route allows ten attempts per IP,
+  // and the origin check above has already consumed one.
+  await attempt(username);
+  await attempt('missing_warmup_user');
+  const known = [];
+  const missing = [];
+  for (let i = 0; i < 3; i += 1) {
+    known.push(await attempt(username));
+    missing.push(await attempt(`missing_timing_${i}`));
+  }
+  for (const result of [...known, ...missing]) {
+    assert.equal(result.status, 401);
+    assert.equal(result.body, known[0].body);
+  }
+  const median = (samples) => [...samples].sort((a, b) => a - b)[Math.floor(samples.length / 2)];
+  const knownMs = median(known.map((result) => result.ms));
+  const missingMs = median(missing.map((result) => result.ms));
+  assert.ok(missingMs > knownMs * 0.5, `missing user skipped password work (${missingMs.toFixed(1)} ms vs ${knownMs.toFixed(1)} ms)`);
 });
 
 test('WebSocket upgrades reject missing and untrusted origins', async () => {

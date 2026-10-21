@@ -94,7 +94,8 @@ app.post<{ Body: { username?: string; password?: string; secondFactor?: string }
     [username.trim().toLowerCase()]
   );
   const account = result.rows[0];
-  if (!account || !(await verifyLoginPassword(account?.password_hash, password))) {
+  const passwordValid = await verifyLoginPassword(account?.password_hash, password);
+  if (!account || !passwordValid) {
     return reply.code(401).send({ error: 'Invalid username or password' });
   }
   if (await hasTotp(account.id)) {
