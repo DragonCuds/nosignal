@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError, notifyUnauthorized, onUnauthorized, type Chat, type RealtimeEvent, type User } from './api.js';
 import { onOutboxSent, startOutbox } from './outbox.js';
 import { clearMediaCache } from './mediaCache.js';
-import { baselineSeq, cacheChats, cacheEventMessage, catchUp, clearCache, noteLiveSeq, prepareCache, readCachedChats, type SyncSignal } from './sync.js';
+import { baselineSeq, cacheChats, cacheEventMessage, catchUp, clearCache, type CatchUp as CatchUpResult, noteLiveSeq, prepareCache, readCachedChats, type SyncSignal } from './sync.js';
 import { ChatIcon } from './icons.js';
 import { Conversation } from './Conversation.js';
 import { NewChatDialog, SettingsDialog } from './Dialogs.js';
@@ -137,9 +137,8 @@ function Messenger({ initialChatId, user, theme, onToggleTheme, onLogout }: Mess
     return () => { live = false; stopOutbox?.(); };
   }, [user.id]);
 
-  const realtime = useRealtime((event) => {
-    setRealtimeEvent(event);
-    if ('message' in event) { noteLiveSeq(event.seq); void cacheEventMessage(event.message); }
+  /** Chat-list part of a message/chat event (shared by live events and events replayed by polling). */
+  const applyToList = (event: RealtimeEvent) => {
     if (!cryptoReady.current) return; // the list is rebuilt as soon as the key is ready
     if (event.type === 'presence') {
       setPresence((current) => ({ ...current, [event.userId]: { online: event.online, lastSeen: event.lastSeen } }));
@@ -159,9 +158,10 @@ function Messenger({ initialChatId, user, theme, onToggleTheme, onLogout }: Mess
     } else if (event.type === 'message.deleted') {
       void loadChats(false);
     }
-  }, () => {
-    // Called synchronously on reconnect: catchUp() marks "syncing" first so live events cannot skip the gap.
-    const pending = catchUp();
+  };
+
+  /** What a reconnect does with a catch-up result: refresh lists and hand the open conversation the missed events. */
+  const applyCatchUp = (pending: Promise<CatchUpResult>) => {
     if (!cryptoReady.current) return;
     if (!registered.current) void initializeEncryption(user.id).then(() => { registered.current = true; }).catch(() => undefined);
     void loadChats(false);
@@ -169,10 +169,27 @@ function Messenger({ initialChatId, user, theme, onToggleTheme, onLogout }: Mess
       for (const event of result.events) void cacheEventMessage(event.message);
       setSync((current) => ({ token: current.token + 1, reset: result.reset, events: result.events }));
     }).catch(() => setSync((current) => ({ token: current.token + 1, reset: true, events: [] })));
-  }, () => notifyUnauthorized());
+  };
+
+  const realtime = useRealtime((event) => {
+    setRealtimeEvent(event);
+    if ('message' in event) { noteLiveSeq(event.seq); void cacheEventMessage(event.message); }
+    applyToList(event);
+  }, () => {
+    // Called synchronously on reconnect: catchUp() marks "syncing" first so live events cannot skip the gap.
+    applyCatchUp(catchUp());
+  }, () => notifyUnauthorized(), async (full) => {
+    // Polling transport (WS and SSE both blocked): one /api/sync per tick. Throws on network error / 401 so the client can back off.
+    const result = await catchUp();
+    if (full || result.reset) { applyCatchUp(Promise.resolve(result)); return; }
+    if (!result.events.length) return;
+    for (const event of result.events) void cacheEventMessage(event.message);
+    setSync((current) => ({ token: current.token + 1, reset: false, events: result.events }));
+    for (const event of result.events) applyToList({ type: event.type, chatId: event.chatId, message: event.message, seq: event.seq });
+  });
 
   // A sent message moves the chat list preview; the open conversation does this itself.
-  useEffect(() => onOutboxSent((row) => { if (row.chatId !== selectedId) void loadChats(false); }), [selectedId, loadChats]);
+  useEffect(() => onOutboxSent((row) => { realtime.nudge(); if (row.chatId !== selectedId) void loadChats(false); }), [selectedId, loadChats]);
 
   useEffect(() => {
     if (realtime.state !== 'offline') { setBannerOn(false); return; }
