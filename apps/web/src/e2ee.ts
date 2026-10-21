@@ -12,6 +12,8 @@ type CryptoState = {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const keyCache = new Map<string, Promise<CryptoKey>>();
+// The identity private key is stored in IndexedDB as an EXTRACTABLE CryptoKey (see toExtractable): backup/recovery must be
+// able to export it. It is not hidden from script in this origin or from someone with access to the browser profile.
 let identity: StoredIdentity | undefined;
 // Private JWK of a identity created in THIS session only (needed for key backup); never persisted.
 let sessionPrivateJwk: JsonWebKey | undefined;
@@ -156,6 +158,7 @@ export const initializeIdentity = async (userId: string, wrap?: (payload: Backup
   else {
     const pair = await generateBackupablePair();
     sessionPrivateJwk = pair.privateJwk;
+    // Stored extractable on purpose (backup needs to export it); see SECURITY.md "Key storage". Do not change without a new backup design.
     identity = { userId, privateKey: await toExtractable(pair.privateJwk), publicKey: pair.publicJwk, fingerprint: await fingerprint(pair.publicJwk) };
     await dbPut(identity);
     created = true;
@@ -179,7 +182,7 @@ export const initializeIdentity = async (userId: string, wrap?: (payload: Backup
 
 export const initializeEncryption = async (userId: string): Promise<string> => (await initializeIdentity(userId)).fingerprint;
 
-/** Current identity as a backup payload; null only for an old key that was stored non-extractable. */
+/** Current identity as a backup payload; null only for an old key that an earlier version stored non-extractable. */
 export const getBackup = async (): Promise<BackupPayload | null> => {
   if (!identity) return null;
   return payloadOf(identity, sessionPrivateJwk);
@@ -219,7 +222,7 @@ export const resetIdentity = async (userId: string, password: string, secondFact
   await api.registerCryptoIdentity(next.publicKey);
 };
 
-/** Restore an identity from a backup (new device): store it non-extractable and re-register. */
+/** Restore an identity from a backup (new device): store it extractable (so it can be backed up again) and re-register. */
 export const importIdentity = async (payload: BackupPayload): Promise<void> => {
   const next: StoredIdentity = {
     userId: payload.userId,

@@ -35,11 +35,22 @@ Presence events (online and last seen) are sent only to current members of a two
 
 ## End-to-end encryption and its boundary
 
-New direct-chat and Saved Messages content is encrypted in the browser before upload. The client keeps a
-non-extractable P-256 identity private key in IndexedDB, derives an envelope key with ECDH +
+New direct-chat and Saved Messages content is encrypted in the browser before upload. The client keeps the
+P-256 identity private key in IndexedDB, derives an envelope key with ECDH +
 HKDF-SHA-256, and encrypts message content and chat keys with AES-256-GCM. The server stores only
 ciphertext, nonces, public identities, and recipient envelopes. A locally pinned identity
 fingerprint prevents a silently changed contact key on that browser profile.
+
+**Key storage.** The identity private key is stored in IndexedDB as an *extractable* WebCrypto key, both
+when it is first created and when it is restored from a backup. This is deliberate: key backup (the
+automatic password-wrapped copy, the recovery key and the `.telkey` file) needs to export it. The
+consequence is that the key can be read by JavaScript running in the application's origin and by anyone
+with access to the browser profile. If either is compromised, the identity key and the messages
+encrypted for it are exposed. Using a non-extractable key would not fully prevent this either, because
+such code could still use the key to decrypt. Only keys created by much older versions may be stored
+non-extractable, and those cannot be backed up. Protect the origin (no third-party scripts, strict CSP)
+and the device. A design with a non-extractable working key and an encrypted-only recoverable copy is
+possible future work.
 
 All new message writes use the version-2 envelope. Its authenticated data binds the ciphertext to
 the chat, sender, client-generated cipher ID, and visible message kind. Nonces are exactly 96 bits,

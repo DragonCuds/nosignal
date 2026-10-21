@@ -60,7 +60,7 @@ export const decryptBackup = async (text: string, passphrase: string): Promise<B
   return p;
 };
 
-/** Generate an identity pair whose private key is extractable ONLY so it can be backed up; use toNonExtractable afterwards. */
+/** Generate an identity pair as exportable JWKs. The key is exportable on purpose, so it can be backed up; e2ee.ts then stores it via toExtractable (see there). */
 // Newer Chromium adds key_ops/ext to exported public JWKs; the server accepts only kty/crv/x/y.
 const slimPublic = (jwk: JsonWebKey): JsonWebKey => ({ kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y });
 
@@ -69,13 +69,17 @@ export const generateBackupablePair = async (): Promise<{ privateJwk: JsonWebKey
   return { privateJwk: await crypto.subtle.exportKey('jwk', pair.privateKey), publicJwk: slimPublic(await crypto.subtle.exportKey('jwk', pair.publicKey)) };
 };
 
-/** Import a private JWK as a NON-extractable CryptoKey (what e2ee.ts stores in IndexedDB). */
+/** Import a private JWK as a non-extractable CryptoKey. NOT what e2ee.ts stores: it uses toExtractable (below). Kept as a helper and covered by tests. */
 export const toNonExtractable = (privateJwk: JsonWebKey): Promise<CryptoKey> =>
   crypto.subtle.importKey('jwk', { kty: privateJwk.kty, crv: privateJwk.crv, x: privateJwk.x, y: privateJwk.y, d: privateJwk.d }, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
 
 export const backupFileName = (userId: string): string => `tel-key-backup-${userId}.telkey`;
 
-/** Like toNonExtractable but the stored key can be exported again later (needed for the automatic server backup and the recovery key). */
+/**
+ * Like toNonExtractable but the key can be exported again later. This is what e2ee.ts stores in IndexedDB for new and
+ * restored identities (needed for the automatic server backup and the recovery key). Consequence: script running in
+ * the same origin, or anyone with access to the browser profile, can export the private key.
+ */
 export const toExtractable = (privateJwk: JsonWebKey): Promise<CryptoKey> =>
   crypto.subtle.importKey('jwk', { kty: privateJwk.kty, crv: privateJwk.crv, x: privateJwk.x, y: privateJwk.y, d: privateJwk.d }, { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
 
