@@ -1,6 +1,6 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { config } from './config.js';
+import { wrapChannelKey, unwrapChannelKey } from './channelKeys.js';
 import { db } from './db.js';
 
 // Private channels (os-8). See docs/CHANNELS.md. Channel code lives here; chats.ts only has small hooks.
@@ -23,21 +23,7 @@ const parseTitle = (value: unknown): string | null => {
 };
 const hashToken = (token: string): string => createHash('sha256').update(token).digest('hex');
 
-// Server-held channel key (NOT end-to-end: the server can unwrap it). Wrapped with a key derived from SESSION_SECRET.
-const wrapKey = (key: Buffer): string => {
-  const kek = createHash('sha256').update(`tel:channel-key:v1\0${config.sessionSecret}`).digest();
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', kek, iv);
-  const body = Buffer.concat([cipher.update(key), cipher.final()]);
-  return Buffer.concat([iv, cipher.getAuthTag(), body]).toString('base64url');
-};
-const unwrapKey = (wrapped: string): Buffer => {
-  const kek = createHash('sha256').update(`tel:channel-key:v1\0${config.sessionSecret}`).digest();
-  const raw = Buffer.from(wrapped, 'base64url');
-  const decipher = createDecipheriv('aes-256-gcm', kek, raw.subarray(0, 12));
-  decipher.setAuthTag(raw.subarray(12, 28));
-  return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]);
-};
+// Server-held channel key (NOT end-to-end: the server can unwrap it).
 
 /** Role of this user in the chat if it is a channel; null when the chat is not a channel (or user is not in it). */
 export const channelRoleForChat = async (chatId: string, userId: string): Promise<Role | null | 'none'> => {
@@ -108,9 +94,10 @@ export const registerChannelRoutes = async (app: FastifyInstance): Promise<void>
     try {
       await client.query('BEGIN');
       const chat = await client.query<{ id: string }>("INSERT INTO chats (type) VALUES ('direct') RETURNING id");
+      const channelKey = wrapChannelKey(randomBytes(32));
       const channel = await client.query<{ id: string }>(
-        'INSERT INTO channels (chat_id, owner_id, title, key_wrapped) VALUES ($1, $2, $3, $4) RETURNING id',
-        [chat.rows[0].id, userId, title, wrapKey(randomBytes(32))]
+        'INSERT INTO channels (chat_id, owner_id, title, key_id, key_wrapped) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        [chat.rows[0].id, userId, title, channelKey.keyId, channelKey.wrapped]
       );
       await client.query('INSERT INTO chat_members (chat_id, user_id) VALUES ($1, $2)', [chat.rows[0].id, userId]);
       await client.query("INSERT INTO channel_members (channel_id, user_id, role) VALUES ($1, $2, 'owner')", [channel.rows[0].id, userId]);
@@ -185,9 +172,9 @@ export const registerChannelRoutes = async (app: FastifyInstance): Promise<void>
   app.get<{ Params: { id: string } }>('/api/channels/:id/key', { preHandler: app.requireUser, config: { rateLimit: READ } }, async (request, reply) => {
     const channel = await mine(request.params.id, request.user!.id, reply);
     if (!channel) return;
-    const row = await db.query<{ key_wrapped: string }>('SELECT key_wrapped FROM channels WHERE id = $1', [channel.id]);
+    const row = await db.query<{ key_id: string; key_wrapped: string }>('SELECT key_id, key_wrapped FROM channels WHERE id = $1', [channel.id]);
     reply.header('Cache-Control', 'no-store');
-    return { version: 1, key: unwrapKey(row.rows[0].key_wrapped).toString('base64url') };
+    return { version: 1, key: unwrapChannelKey(row.rows[0].key_id, row.rows[0].key_wrapped).toString('base64url') };
   });
 
   app.post<{ Params: { id: string } }>('/api/channels/:id/invites', { preHandler: app.requireUser, config: { rateLimit: WRITE } }, async (request, reply) => {

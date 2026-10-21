@@ -13,6 +13,8 @@ const dataDir = await mkdtemp(path.join(os.tmpdir(), 'tel-channels-test-'));
 process.env.NODE_ENV = 'test';
 process.env.DATA_DIR = dataDir;
 process.env.SESSION_SECRET = 'channels-test-secret-with-at-least-32-bytes';
+process.env.CHANNEL_KEYRING = `test:${Buffer.alloc(32, 7).toString('base64url')}`;
+process.env.CHANNEL_ACTIVE_KEY_ID = 'test';
 process.env.TRUSTED_ORIGINS = origin;
 
 const load = (name) => import(path.join(dist, name));

@@ -73,7 +73,9 @@ before(async () => {
       TRUSTED_ORIGINS: 'https://messenger.example',
       OPEN_REGISTRATION: '1',
       DATA_DIR: dataDir,
-      SESSION_SECRET: 'security-test-only-secret-with-at-least-32-bytes'
+      SESSION_SECRET: 'security-test-only-secret-with-at-least-32-bytes',
+      CHANNEL_KEYRING: `test:${Buffer.alloc(32, 7).toString('base64url')}`,
+      CHANNEL_ACTIVE_KEY_ID: 'test'
     },
     stdio: ['ignore', 'ignore', 'pipe']
   });

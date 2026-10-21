@@ -110,6 +110,8 @@ export const config = {
   tlsKeyFile,
   dataDir,
   sessionSecret,
+  channelKeyring: process.env.CHANNEL_KEYRING?.trim() || '',
+  channelActiveKeyId: process.env.CHANNEL_ACTIVE_KEY_ID?.trim() || '',
   port,
   isProduction,
   trustedOrigins,

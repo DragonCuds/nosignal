@@ -2,6 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db } from './db.js';
+import { migrateChannelKeys } from './channelKeys.js';
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), '../migrations');
 
@@ -32,6 +33,8 @@ export const runMigrations = async (): Promise<void> => {
       client.release();
     }
   }
+  const rewrapped = await migrateChannelKeys();
+  if (rewrapped) process.stdout.write(`Rewrapped ${rewrapped} channel keys\n`);
 };
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

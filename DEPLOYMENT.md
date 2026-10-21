@@ -14,7 +14,7 @@ npm ci
 npm run build
 ```
 
-Edit `/etc/tel-messenger.env`, set `DATA_DIR=/var/lib/tel-messenger`, and generate `SESSION_SECRET` with `openssl rand -base64 48`. Never commit or print the resulting file. Initialize or upgrade the database with the same service environment:
+Edit `/etc/tel-messenger.env`, set `DATA_DIR=/var/lib/tel-messenger`, generate `SESSION_SECRET` with `openssl rand -base64 48`, and generate a separate 32-byte `CHANNEL_KEYRING` entry with `openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'`. Set `CHANNEL_ACTIVE_KEY_ID` to that entry's ID. Never commit or print the resulting file. Initialize or upgrade the database with the same service environment:
 
 ```sh
 sudo systemd-run --wait --pipe --collect \
@@ -80,6 +80,14 @@ sudo systemctl start tel-messenger
 ```
 
 Restrict archives to mode `0600`, keep an encrypted off-host copy, and periodically restore one into a separate directory and run the test suite. Restoring is the reverse: stop the service, replace `DATA_DIR` from a verified archive with the correct ownership, run `npm run migrate`, and restart.
+
+## Channel wrapping keys and rotation
+
+Channel keys are server-held, so keep `CHANNEL_KEYRING` backed up with the database. Its format is `id:base64url-key,id2:base64url-key`, with each key exactly 32 random bytes. `CHANNEL_ACTIVE_KEY_ID` selects the key for new channels. Do not reuse `SESSION_SECRET` as a channel key. A database backup without the matching channel keyring cannot recover channel keys.
+
+For the first upgrade from a release without `CHANNEL_KEYRING`, **keep the original `SESSION_SECRET`**. Stop the service, back up and restore-test the database and environment file in an isolated directory, add a new channel keyring entry, then run `npm run migrate` with the original secret. This rewraps old rows under the new key and verifies every row; it can be rerun after interruption. The installer creates a separate key if the env file has none. Check `SELECT key_id, count(*) FROM channels GROUP BY key_id` and read an old channel before rotating `SESSION_SECRET`.
+
+To rotate channel keys, add a new `id:key` entry, set `CHANNEL_ACTIVE_KEY_ID` to the new ID, stop writers, back up and restore-test the database and environment file, then run `npm run migrate`. All rows are rewrapped to the active ID. Verify old and new channel reads and the key ID counts before removing the old entry. Keep old keys through the retention period of any database backup that needs them. If a migration fails, keep both keys and rerun it after resolving the error; restore the paired database and env backup for rollback. Code from before this migration cannot read rewrapped rows, so rollback must restore the pre-upgrade database too. Rotating `SESSION_SECRET` separately logs out existing sessions; after the initial channel migration it does not change channel wrapping.
 
 ## Behind your own nginx
 
