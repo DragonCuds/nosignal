@@ -54,6 +54,8 @@ Users can paste a `t.me/addstickers/NAME` link in the sticker picker to copy a T
 
 The token never leaves the server (it is not sent to clients, logged, or included in errors) and users never talk to the bot. Limits: 120 stickers per pack, 512 KB per file, 5 imports per user per hour, 60 s per import; static `.webp`, animated `.tgs` and video `.webm` stickers are stored as-is under the usual sticker rules. Re-importing a pack adds only missing stickers. Sticker artwork belongs to its creators; the feature is meant for personal use, and Telegram's terms apply.
 
+If the server cannot reach Telegram, run the standalone bot in `tools/telegram-sticker-zip-bot/` on any machine that can (see its README): users send it a pack link and upload the ZIP it returns through "Add pack" in the sticker picker. Both ways can be used side by side; the bot is never installed on the server.
+
 ## Moving an existing PostgreSQL installation
 
 Stop writers, restore a `pg_dump` into a throw-away PostgreSQL database, then run the converter against that copy. Never point migration testing at the live database.
