@@ -162,3 +162,34 @@ test('account deletion purges the stored copy', async () => {
   await db.query('DELETE FROM users WHERE id = $1', [id]);
   assert.equal((await db.query('SELECT 1 FROM user_crypto_backups WHERE user_id = $1', [id])).rowCount, 0);
 });
+
+test('new identity + backup in ONE request: no 404 afterwards; invalid blob rejected and nothing stored; existing identity ignores the blob', async () => {
+  const cookie = await signup('bk_atomic');
+  const bad = await call(cookie, 'PUT', '/api/crypto/identity', { publicKey: pub('b'), backup: goodBlob({ iterations: 10 }) });
+  assert.equal(bad.statusCode, 400);
+  assert.equal((await call(cookie, 'GET', '/api/crypto/backup')).statusCode, 404);
+  const ok = await call(cookie, 'PUT', '/api/crypto/identity', { publicKey: pub('b'), backup: goodBlob() });
+  assert.equal(ok.statusCode, 200);
+  assert.equal(ok.json().backupSaved, true);
+  const got = await call(cookie, 'GET', '/api/crypto/backup');
+  assert.equal(got.statusCode, 200);
+  assert.equal(got.json().mode, 'auto');
+  assert.deepEqual(got.json().backup, goodBlob());
+  // same identity again: idempotent, blob ignored
+  const again = await call(cookie, 'PUT', '/api/crypto/identity', { publicKey: pub('b'), backup: goodBlob({ wrapped: b64(500) }) });
+  assert.equal(again.statusCode, 200);
+  assert.equal(again.json().backupSaved, false);
+  assert.deepEqual((await call(cookie, 'GET', '/api/crypto/backup')).json().backup, goodBlob());
+  assert.equal((await call(cookie, 'PUT', '/api/crypto/identity', { publicKey: pub('c'), backup: goodBlob() })).statusCode, 409);
+});
+
+test('manual mode: a new identity does not silently create a server copy', async () => {
+  const cookie = await signup('bk_manual_new');
+  assert.equal((await call(cookie, 'DELETE', '/api/crypto/backup')).statusCode, 204);
+  const r = await call(cookie, 'PUT', '/api/crypto/identity', { publicKey: pub('d'), backup: goodBlob() });
+  assert.equal(r.statusCode, 200);
+  assert.equal(r.json().backupSaved, false);
+  const got = (await call(cookie, 'GET', '/api/crypto/backup')).json();
+  assert.equal(got.mode, 'manual');
+  assert.equal(got.backup, null);
+});
