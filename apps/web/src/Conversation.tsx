@@ -27,6 +27,7 @@ const NEAR_BOTTOM_PX = 96;
 const MENU_CLOSE_MS = 160;
 const LEAVE_MS = 300;
 
+const KEY_CHANGED_COPY = 'کلید رمزنگاری یکی از اعضا عوض شده است. هشدار بالای صفحه را بررسی و تأیید کنید، سپس دوباره بفرستید.';
 const useLatest = <A extends unknown[], R>(fn: (...args: A) => R): ((...args: A) => R) => {
   const ref = useRef(fn);
   ref.current = fn;
@@ -286,6 +287,8 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
     } catch { /* offline or not ready: try again later */ }
   });
   useEffect(() => { setKeyChanges([]); setKeyDismissed(false); void refreshKeyChanges(); }, [chat.id]);
+  // Sending was refused because a member's key no longer matches its pin: show the key-change notice now (not only on the next poll).
+  const keyChangedWhileSending = () => { setKeyDismissed(false); void refreshKeyChanges(); };
   // A queued message was refused because the contact started fresh: show the key-change notice instead of waiting for a reload.
   useEffect(() => onKeyChangeSuspected((changedChat) => { if (changedChat === chat.id) { setKeyDismissed(false); void refreshKeyChanges(); } }), [chat.id]);
   useEffect(() => {
@@ -469,6 +472,7 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
       chatId: chat.id, userId: currentUser.id, replyToId: replyTo, draft, append, settle,
       discard: (temporary) => {
         failedId = temporary.id;
+        void refreshKeyChanges(); // the send may have failed because a member's key changed (sendAttachment hides the error type): show the notice if so
         const info = attachmentPayload(temporary.payload);
         if (info) localBlobs.set(info.attachment.id, input.blob); // so the failed bubble still shows the file
         markFailed(temporary.id, 'ارسال فایل انجام نشد.', () => { dropDraft(temporary.id); void attachWith(input, replyTo); });
@@ -497,7 +501,8 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
       const encrypted = await encryptContent(chat.id, currentUser.id, { kind: 'text', text, payload: null });
       queue(newClientMsgId(), 'text', encrypted, { text, payload: null }, replyToId);
       return true;
-    } catch {
+    } catch (caught) {
+      if (caught instanceof KeyChangedError) { keyChangedWhileSending(); showError(KEY_CHANGED_COPY + ' متن شما نگه داشته شد.'); return false; }
       showError('پیام رمزگذاری نشد؛ طرف مقابل باید یک‌بار وارد شود. متن شما نگه داشته شد.');
       return false;
     }
@@ -514,7 +519,9 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
       setMessages((current) => current.filter((item) => item.id !== temporary.id));
       after?.();
     } catch (caught) {
-      const changed = caught instanceof StaleChatKeyError ? ' کلید گفت‌وگو همین الان عوض شد؛ دوباره بفرستید.' : '';
+      if (caught instanceof KeyChangedError) keyChangedWhileSending();
+      const changed = caught instanceof StaleChatKeyError ? ' کلید گفت‌وگو همین الان عوض شد؛ دوباره بفرستید.'
+        : caught instanceof KeyChangedError ? ` ${KEY_CHANGED_COPY}` : '';
       markFailed(temporary.id, (kind === 'sticker' ? 'استیکر رمزگذاری یا ارسال نشد.' : 'گیف رمزگذاری یا ارسال نشد.') + changed, () => { dropDraft(temporary.id); void sendMedia(kind, payload, source, replyTo, after); });
     }
   };
@@ -549,7 +556,10 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
       setMode(null);
       onChatChanged(chat.id);
       return true;
-    } catch { showError('ویرایش رمزگذاری‌شده انجام نشد.'); return false; }
+    } catch (caught) {
+      if (caught instanceof KeyChangedError) { keyChangedWhileSending(); showError(KEY_CHANGED_COPY); } else showError('ویرایش رمزگذاری‌شده انجام نشد.');
+      return false;
+    }
   };
 
   const retry = useLatest((message: UiMessage) => {
