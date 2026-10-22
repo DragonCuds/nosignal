@@ -6,6 +6,8 @@
 
 # NoSignal
 
+> **Not a Signal replacement.** NoSignal does not try to compete with Signal on security and is not as secure as Signal in any respect. It is a web app, so whoever runs the server delivers the code your browser runs and could change it to read your messages; there is no forward secrecy and no professional audit, and earlier versions claimed protections they did not have. Do not use it where anyone's safety depends on secrecy. Read [SECURITY.md](SECURITY.md) ("Read this first") before you rely on it.
+
 A self-hostable, Telegram-style web messenger built for bad networks. One small Node.js server, one SQLite file, a Persian/RTL-first progressive web app. It runs entirely on your own machine with no international internet at runtime: no CDNs, no external fonts, no third-party push or analytics services.
 
 Persian README: [README.fa.md](README.fa.md)
