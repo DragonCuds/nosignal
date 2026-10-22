@@ -348,12 +348,15 @@ test('honest: a member with no public key (reset, not registered again yet): sen
 });
 
 // ---- UI: the send-error handling in Conversation.tsx (source check; the component itself needs a browser, see tests/web-e2e) ---------------------
-test('UI: KeyChangedError while sending (text, sticker/gif, edit) refreshes the key-change banner and shows the accurate message; attachments refresh it on failure', async () => {
+test('UI: KeyChangedError while sending (text, sticker/gif, edit, attachments) refreshes the key-change banner and shows the accurate message', async () => {
   const source = await readFile(path.join(src, 'Conversation.tsx'), 'utf8');
   const body = (name) => { const start = source.indexOf(`const ${name} = async`); assert.ok(start > 0, name); return source.slice(start, source.indexOf('\n  };\n', start)); };
   assert.match(source, /const keyChangedWhileSending = \(\) => \{ setKeyDismissed\(false\); void refreshKeyChanges\(\); \};/);
   for (const name of ['sendText', 'sendMedia', 'submit']) assert.match(body(name), /instanceof KeyChangedError\)[^\n]*keyChangedWhileSending\(\)|instanceof KeyChangedError\) keyChangedWhileSending\(\)/, name);
   assert.match(body('sendText'), /KEY_CHANGED_COPY[^\n]*متن شما نگه داشته شد/);
-  assert.match(source, /discard: \(temporary\) => \{\n\s+failedId = temporary\.id;\n\s+void refreshKeyChanges\(\);/);
+  assert.match(source, /discard: \(temporary, caught\) => \{\n\s+failedId = temporary\.id;\n\s+if \(caught instanceof KeyChangedError\) \{ keyChangedWhileSending\(\); failedCopy = KEY_CHANGED_COPY; \}/);
+  const attachment = source.slice(source.indexOf('const attachWith'), source.indexOf('const attach ='));
+  assert.match(attachment, /markFailed\(temporary\.id, failedCopy \?\?/);
+  assert.match(attachment, /error: failedCopy \?\? copy/);
   assert.doesNotMatch(source.slice(source.indexOf('const KEY_CHANGED_COPY'), source.indexOf('const KEY_CHANGED_COPY') + 200), /باید یک‌بار وارد شود/);
 });

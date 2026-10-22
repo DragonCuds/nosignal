@@ -16,7 +16,7 @@ export type SenderDeps = {
   draft: (partial: Pick<UiMessage, 'kind' | 'text' | 'payload' | 'replyToId'>) => UiMessage;
   append: (message: UiMessage) => void;
   settle: (temporary: UiMessage, saved: UiMessage) => void;
-  discard: (temporary: UiMessage) => void;
+  discard: (temporary: UiMessage, error: unknown) => void;
   showError: (copy: string) => void;
 };
 
@@ -64,7 +64,7 @@ export const sendAttachment = async (deps: SenderDeps, input: AttachmentInput): 
     });
     deps.settle(temporary, { ...saved, text: caption ?? null, payload });
   } catch (error) {
-    if (temporary) deps.discard(temporary);
+    if (temporary) deps.discard(temporary, error);
     if (id) localBlobs.delete(id);
     deps.showError(error instanceof Error && error.message && !/[A-Za-z]{4}/.test(error.message) ? error.message : 'ارسال فایل انجام نشد.');
   } finally {
