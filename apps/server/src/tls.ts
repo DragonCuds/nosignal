@@ -184,6 +184,8 @@ const makeCa = (f: TlsFiles, hosts: string[]): void => {
     '-addext', constraints,
     '-out', f.caCrt
   ]);
+  // Public certificate. Pin 0644 so a permissive umask cannot leave it group-writable.
+  chmodSync(f.caCrt, 0o644);
 };
 
 const makeServerCert = (f: TlsFiles, hosts: string[], days: number, previousOwner = existsSync(f.key) ? statSync(f.key) : null): void => {
@@ -212,6 +214,8 @@ const makeServerCert = (f: TlsFiles, hosts: string[], days: number, previousOwne
       '-CAserial', join(tmp, 'ca.srl'), '-sha256', '-days', String(days), '-extfile', ext, '-out', crt
     ]);
     chmodSync(key, 0o600);
+    // Public certificate. Pin 0644 so a permissive umask cannot leave it group-writable.
+    chmodSync(crt, 0o644);
     // Offline renewal is run by an operator while the web service is stopped.
     // Keep the leaf key readable by its original service account afterwards.
     if (previousOwner) {
