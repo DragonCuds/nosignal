@@ -1,10 +1,9 @@
 // kb-1 end-to-end: real server (https://127.0.0.1:3068, NODE_ENV=production TLS_MODE=auto OPEN_REGISTRATION=1), headless chromium.
 import puppeteer from 'puppeteer-core';
-import { mkdirSync } from 'node:fs';
+import { makeRun } from '../web-e2e/lib.mjs';
 
 const BASE = process.env.BASE ?? 'https://127.0.0.1:3068';
-const SHOTS = '/root/tel-dev/shots/kb1';
-mkdirSync(SHOTS, { recursive: true });
+const SHOTS = makeRun('kb1').shots;
 const tag = Math.random().toString(36).slice(2, 7);
 const NAME = { A: `ka${tag}`, B: `kb${tag}` };
 const PASS = 'pass-word-1234';
@@ -88,6 +87,7 @@ try {
   const recoveryKey = await A2.evaluate(() => document.querySelector('dialog[open] textarea[aria-label="کلید بازیابی"]')?.value ?? '');
   check('recovery key text is shown', recoveryKey.startsWith('TELKEY1-'), `${recoveryKey.length} chars`);
   await A2.evaluate(() => document.querySelector('dialog[open] .backup-check input').click());
+  await A2.type('dialog[open] .group__box:has(.backup-check) input[type=password][autocomplete=current-password]', PASS);
   await shot(A2, '03-power-confirm');
   await clickText(A2, 'dialog[open] button', 'پاک کردن نسخهٔ سرور'); await sleep(1500);
   const after = await apiGet(A2, '/api/crypto/backup');
