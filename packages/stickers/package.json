@@ -12,10 +12,10 @@
   },
   "dependencies": {
     "lottie-web": "^5.13.0",
-    "pako": "^2.1.0"
+    "pako": "^3.0.2"
   },
   "devDependencies": {
-    "@types/pako": "^2.0.3",
+    "@types/pako": "^3.0.0",
     "typescript": "^5.9.0",
     "vite": "^7.0.0"
   }
