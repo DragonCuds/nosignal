@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { db } from './db.js';
+import { db, type DbClient } from './db.js';
 import { notifyChatNew } from './realtime.js';
 
 // End-to-end encrypted groups (gr-1). See docs/GROUPS.md. A group is an ordinary 'direct' chat row linked in
@@ -51,32 +51,46 @@ const memberCount = async (groupId: string): Promise<number> =>
 const identityOf = async (userId: string): Promise<boolean> =>
   (await db.query('SELECT 1 FROM user_crypto_identities WHERE user_id = $1', [userId])).rowCount === 1;
 
+/** Anything that can run a query: the shared `db`, or a transaction `client` (never use `db` while a client holds BEGIN). */
+export type Queryable = Pick<DbClient, 'query'>;
+/** A refused gate: the HTTP status and JSON body the route answers with. */
+export type GateFailure = { ok: false; status: number; body: Record<string, unknown> };
+export type GateResult = { ok: true; keyVersion: number | null; staff: boolean } | GateFailure;
+
 /**
- * Hook for the message routes. Non-group chats pass straight through ({ok:true, keyVersion:null}).
+ * Gate decision for the message routes, pure data (no reply). Non-group chats pass straight through ({ok:true, keyVersion:null}).
  * In a group: posting/editing needs the CURRENT key version and no pending rotation; deleting is allowed for the
- * sender or an owner/admin (`staff`). A reply has been sent when ok is false.
+ * sender or an owner/admin (`staff`). Call it with a transaction client to decide on the state the write will really see.
  */
-export const groupMessageGate = async (
-  chatId: string, userId: string, action: 'post' | 'edit' | 'delete', keyVersion: unknown, reply: FastifyReply
-): Promise<{ ok: true; keyVersion: number | null; staff: boolean } | { ok: false }> => {
-  const row = await db.query<{ key_version: number; pending_version: number | null; role: Role | null }>(
+export const groupGateCheck = async (
+  q: Queryable, chatId: string, userId: string, action: 'post' | 'edit' | 'delete', keyVersion: unknown
+): Promise<GateResult> => {
+  const row = await q.query<{ key_version: number; pending_version: number | null; role: Role | null }>(
     `SELECT g.key_version, g.pending_version, gm.role FROM groups g
      LEFT JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = $2 WHERE g.chat_id = $1`,
     [chatId, userId]
   );
   const group = row.rows[0];
   if (!group) return { ok: true, keyVersion: null, staff: false };
-  if (!group.role) { await reply.code(404).send({ error: 'Chat not found' }); return { ok: false }; }
+  if (!group.role) return { ok: false, status: 404, body: { error: 'Chat not found' } };
   if (action === 'delete') return { ok: true, keyVersion: null, staff: group.role === 'owner' || group.role === 'admin' };
   if (group.key_version < 1 || group.pending_version !== null) {
-    await reply.code(409).send({ error: 'Group key rotation pending; an admin must open the group first' });
-    return { ok: false };
+    return { ok: false, status: 409, body: { error: 'Group key rotation pending; an admin must open the group first' } };
   }
   if (keyVersion !== group.key_version) {
-    await reply.code(400).send({ error: `keyVersion must be the current group key version (${group.key_version})`, keyVersion: group.key_version });
-    return { ok: false };
+    return { ok: false, status: 400, body: { error: `keyVersion must be the current group key version (${group.key_version})`, keyVersion: group.key_version } };
   }
   return { ok: true, keyVersion: group.key_version, staff: false };
+};
+
+/** Route hook form of groupGateCheck: a reply has been sent when ok is false. */
+export const groupMessageGate = async (
+  chatId: string, userId: string, action: 'post' | 'edit' | 'delete', keyVersion: unknown, reply: FastifyReply
+): Promise<{ ok: true; keyVersion: number | null; staff: boolean } | { ok: false }> => {
+  const gate = await groupGateCheck(db, chatId, userId, action, keyVersion);
+  if (gate.ok) return gate;
+  await reply.code(gate.status).send(gate.body);
+  return { ok: false };
 };
 
 // Remove a member and mark the key as needing rotation (they know the current key).
@@ -319,6 +333,12 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
       if (version !== current.pending_version && version !== current.key_version + 1) {
         await client.query('ROLLBACK');
         return reply.code(409).send({ error: 'Wrong key version', keyVersion: current.key_version, pendingKeyVersion: current.pending_version });
+      }
+      // The role was checked before BEGIN; an admin demoted or removed in between must not publish a key.
+      const role = (await client.query<{ role: Role }>('SELECT role FROM group_members WHERE group_id = $1 AND user_id = $2', [group.id, request.user!.id])).rows[0]?.role;
+      if (role !== 'owner' && role !== 'admin') {
+        await client.query('ROLLBACK');
+        return reply.code(403).send({ error: 'Only owners and admins can rotate the key' });
       }
       const currentMembers = (await client.query<{ user_id: string; public_jwk: JsonWebKey | null }>(
         `SELECT gm.user_id, ci.public_jwk FROM group_members gm

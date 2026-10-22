@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { wrapChannelKey, unwrapChannelKey } from './channelKeys.js';
-import { db } from './db.js';
+import { db, type DbClient } from './db.js';
 
 // Private channels (os-8). See docs/CHANNELS.md. Channel code lives here; chats.ts only has small hooks.
 type Role = 'owner' | 'admin' | 'member';
@@ -26,8 +26,8 @@ const hashToken = (token: string): string => createHash('sha256').update(token).
 // Server-held channel key (NOT end-to-end: the server can unwrap it).
 
 /** Role of this user in the chat if it is a channel; null when the chat is not a channel (or user is not in it). */
-export const channelRoleForChat = async (chatId: string, userId: string): Promise<Role | null | 'none'> => {
-  const row = await db.query<{ role: Role | null }>(
+export const channelRoleForChat = async (chatId: string, userId: string, q: Pick<DbClient, 'query'> = db): Promise<Role | null | 'none'> => {
+  const row = await q.query<{ role: Role | null }>(
     `SELECT cm.role FROM channels c LEFT JOIN channel_members cm ON cm.channel_id = c.id AND cm.user_id = $2 WHERE c.chat_id = $1`,
     [chatId, userId]
   );
@@ -35,12 +35,19 @@ export const channelRoleForChat = async (chatId: string, userId: string): Promis
   return row.rows[0].role;
 };
 
+/** The refusal (status + body) when the chat is a channel and the caller may not post; null when posting is allowed. */
+export const postRefusal = async (chatId: string, userId: string, q: Pick<DbClient, 'query'> = db): Promise<{ status: number; body: { error: string } } | null> => {
+  const role = await channelRoleForChat(chatId, userId, q);
+  if (role === 'none' || role === 'owner' || role === 'admin') return null;
+  if (role === null) return { status: 404, body: { error: 'Chat not found' } };
+  return { status: 403, body: { error: 'Only channel owners and admins can post' } };
+};
+
 /** Hook for message routes: false (and a reply sent) when the chat is a channel and the caller may not post. */
 export const ensureCanPost = async (chatId: string, userId: string, reply: FastifyReply): Promise<boolean> => {
-  const role = await channelRoleForChat(chatId, userId);
-  if (role === 'none' || role === 'owner' || role === 'admin') return true;
-  if (role === null) { await reply.code(404).send({ error: 'Chat not found' }); return false; }
-  await reply.code(403).send({ error: 'Only channel owners and admins can post' });
+  const refusal = await postRefusal(chatId, userId);
+  if (!refusal) return true;
+  await reply.code(refusal.status).send(refusal.body);
   return false;
 };
 

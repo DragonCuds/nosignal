@@ -25,7 +25,7 @@ const SSE_MAX_BUFFERED = 1024 * 1024;
 
 // One connected client, over WebSocket or SSE. `send` never throws.
 // `tokenHash` identifies the session the connection was authenticated with; `close` ends it (WS code 4401 / SSE end).
-type SocketState = { socket?: WebSocket; userId: string; tokenHash: string | null; ip?: string; alive: boolean; events: number[]; send(event: RealtimeServerEvent): void; close(): void };
+type SocketState = { socket?: WebSocket; userId: string; tokenHash: string | null; ip?: string; alive: boolean; events: number[]; send(event: RealtimeServerEvent): void; close(): void; live(): boolean };
 type RealtimeService = {
   broadcastToChat(chatId: string, event: RealtimeServerEvent): void;
   /** Close live connections of revoked sessions: one session (tokenHash) or all of userId except exceptTokenHash. */
@@ -127,6 +127,14 @@ export const registerRealtime = async (app: FastifyInstance): Promise<void> => {
     sockets.add(state);
     if (becameOnline) void broadcastPresence(state.userId, true, null).catch((error: unknown) => app.log.error(error, 'Failed to deliver presence'));
   };
+  // One connection budget for BOTH transports (WebSocket and SSE): global, per IP, per user, per session.
+  const overConnectionLimit = (ip: string, userId: string, tokenHash: string | null): boolean => {
+    const active = [...sockets].filter((state) => state.live());
+    return active.length >= WS_MAX_CONNECTIONS ||
+      active.filter((state) => state.ip === ip).length >= WS_MAX_CONNECTIONS_PER_IP ||
+      active.filter((state) => state.userId === userId).length >= WS_MAX_CONNECTIONS_PER_USER ||
+      (tokenHash !== null && active.filter((state) => state.tokenHash === tokenHash).length >= WS_MAX_CONNECTIONS_PER_SESSION);
+  };
   const disconnect = (state: SocketState): void => {
     if (!sockets.delete(state)) return;
     if (!onlineElsewhere(state.userId)) void broadcastPresence(state.userId, false, new Date().toISOString()).catch((error: unknown) => app.log.error(error, 'Failed to deliver presence'));
@@ -180,7 +188,7 @@ export const registerRealtime = async (app: FastifyInstance): Promise<void> => {
   });
 
   wss.on('connection', (socket: WebSocket, _request: IncomingMessage, userId: string, tokenHash: string, ip: string) => {
-    const state: SocketState = { socket, userId, tokenHash, ip, alive: true, events: [], send: (event) => send(socket, event), close: () => socket.close(WS_CLOSE_SESSION_REVOKED, 'session revoked') };
+    const state: SocketState = { socket, userId, tokenHash, ip, alive: true, events: [], send: (event) => send(socket, event), close: () => socket.close(WS_CLOSE_SESSION_REVOKED, 'session revoked'), live: () => socket.readyState !== WebSocket.CLOSED };
     connect(state);
     socket.on('pong', () => { state.alive = true; });
     socket.on('message', (data: WebSocket.RawData) => {
@@ -203,6 +211,14 @@ export const registerRealtime = async (app: FastifyInstance): Promise<void> => {
     }
     const raw = reply.raw;
     const userId = request.user!.id;
+    const ip = peerIp(request.raw);
+    const sessionHash = currentTokenHash(request);
+    // Same caps as the WebSocket, checked before any stream header is written. The check and connect() below
+    // run in one synchronous turn, so concurrent opens cannot all slip under the cap.
+    if (overConnectionLimit(ip, userId, sessionHash)) {
+      void reply.code(503).header('Retry-After', '30').send({ error: 'Too many realtime connections' });
+      return;
+    }
     // hijack() skips Fastify's own writer, so carry over the headers helmet already set.
     reply.hijack();
     raw.socket?.setTimeout(0);
@@ -220,7 +236,7 @@ export const registerRealtime = async (app: FastifyInstance): Promise<void> => {
       if (raw.writableLength > SSE_MAX_BUFFERED) { raw.destroy(); return; }
       raw.write(chunk);
     };
-    const state: SocketState = { userId, tokenHash: currentTokenHash(request), alive: true, events: [], send: (event) => write(`data: ${JSON.stringify(event)}\n\n`), close: () => { if (!raw.destroyed && !raw.writableEnded) raw.end(); } };
+    const state: SocketState = { userId, tokenHash: sessionHash, ip, alive: true, events: [], send: (event) => write(`data: ${JSON.stringify(event)}\n\n`), close: () => { if (!raw.destroyed && !raw.writableEnded) raw.end(); }, live: () => !raw.destroyed && !raw.writableEnded };
     const keepalive = setInterval(() => write(': keepalive\n\n'), SSE_KEEPALIVE_MS);
     keepalive.unref();
     const cleanup = (): void => { clearInterval(keepalive); disconnect(state); };
@@ -289,11 +305,7 @@ export const registerRealtime = async (app: FastifyInstance): Promise<void> => {
       void getSessionUserForToken(token).then((user) => {
         if (!pending.has(socket) || socket.destroyed) return;
         if (!user) { release(); reject('401 Unauthorized'); return; }
-        const active = [...sockets].filter((state) => state.socket && state.socket.readyState !== WebSocket.CLOSED);
-        if (active.length >= WS_MAX_CONNECTIONS ||
-            active.filter((state) => state.ip === ip).length >= WS_MAX_CONNECTIONS_PER_IP ||
-            active.filter((state) => state.userId === user.id).length >= WS_MAX_CONNECTIONS_PER_USER ||
-            active.filter((state) => state.tokenHash === tokenHash).length >= WS_MAX_CONNECTIONS_PER_SESSION) {
+        if (overConnectionLimit(ip, user.id, tokenHash)) {
           release(); reject('503 Service Unavailable'); return;
         }
         try {
