@@ -4,7 +4,7 @@ import { parseEncryptedMessageV2, type EncryptedMessageV2 } from './encrypted-me
 import { recordEvent, registerSync } from './sync.js';
 import { ensureCanPost, registerChannelRoutes } from './channels.js';
 import { registerGroupRoutes } from './groups.js';
-import { messageKeyGate } from './chatKeys.js';
+import { messageKeyGate, txMessageGate } from './chatKeys.js';
 import { notifyChatNew } from './realtime.js';
 
 const MESSAGE_KINDS = ['text', 'sticker', 'gif', 'photo', 'video', 'voice', 'file'] as const;
@@ -470,6 +470,12 @@ export const registerChatRoutes = async (app: FastifyInstance): Promise<void> =>
     let duplicate = false;
     try {
       await client.query('BEGIN');
+      // The gates above ran before BEGIN; decide again on what this transaction will write over.
+      const txGate = await txMessageGate(client, chatId, request.user!.id, 'post', isPlainObject(request.body) ? request.body.keyVersion : undefined);
+      if (!txGate.ok) {
+        await client.query('ROLLBACK');
+        return reply.code(txGate.status).send(txGate.body);
+      }
       // Lookup inside the transaction: the insert trigger rejects a reused cipherId, and concurrent retries are serialized.
       const existing = incoming.clientMsgId ? await client.query<{ id: string; chat_id: string }>(
         'SELECT id, chat_id FROM messages WHERE sender_id = $1 AND client_msg_id = $2', [request.user!.id, incoming.clientMsgId]
@@ -485,7 +491,7 @@ export const registerChatRoutes = async (app: FastifyInstance): Promise<void> =>
            VALUES ($1, $2, $3, NULL, $4, $5, 2, $6, $7, $8, $9, $10, $11, $12)
            ON CONFLICT DO NOTHING
            RETURNING id`,
-          [chatId, request.user!.id, incoming.kind, null, incoming.replyToId, incoming.encrypted.cipherId, incoming.encrypted.nonce, incoming.encrypted.ciphertext, incoming.encryptedMediaId, incoming.attachmentId, incoming.clientMsgId, gate.keyVersion]
+          [chatId, request.user!.id, incoming.kind, null, incoming.replyToId, incoming.encrypted.cipherId, incoming.encrypted.nonce, incoming.encrypted.ciphertext, incoming.encryptedMediaId, incoming.attachmentId, incoming.clientMsgId, txGate.keyVersion]
         );
         if (!inserted.rows[0]) throw new Error('message insert was ignored');
         messageId = inserted.rows[0].id;
@@ -542,6 +548,11 @@ export const registerChatRoutes = async (app: FastifyInstance): Promise<void> =>
       let seq = 0;
       try {
         await client.query('BEGIN');
+        const txGate = await txMessageGate(client, chatId, request.user!.id, 'edit', isPlainObject(request.body) ? request.body.keyVersion : undefined);
+        if (!txGate.ok) {
+          await client.query('ROLLBACK');
+          return reply.code(txGate.status).send(txGate.body);
+        }
         updated = (await client.query<{ id: string }>(
         `UPDATE messages
          SET text = NULL, encryption_version = 2, cipher_id = $1, nonce = $2, ciphertext = $3,
@@ -549,7 +560,7 @@ export const registerChatRoutes = async (app: FastifyInstance): Promise<void> =>
              edited_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = $4 AND chat_id = $5 AND sender_id = $6 AND kind = 'text' AND deleted_at IS NULL
          RETURNING id`,
-        [encrypted.cipherId, encrypted.nonce, encrypted.ciphertext, messageId, chatId, request.user!.id, gate.keyVersion]
+        [encrypted.cipherId, encrypted.nonce, encrypted.ciphertext, messageId, chatId, request.user!.id, txGate.keyVersion]
         )).rows[0];
         if (updated) seq = await recordEvent(client, chatId, 'message.edited', updated.id);
         await client.query(updated ? 'COMMIT' : 'ROLLBACK');
@@ -583,6 +594,11 @@ export const registerChatRoutes = async (app: FastifyInstance): Promise<void> =>
       let seq = 0;
       try {
         await client.query('BEGIN');
+        const txGate = await txMessageGate(client, chatId, request.user!.id, 'delete', undefined);
+        if (!txGate.ok) {
+          await client.query('ROLLBACK');
+          return reply.code(txGate.status).send(txGate.body);
+        }
         deleted = (await client.query<{ id: string }>(
         `UPDATE messages
          SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), text = NULL, payload = NULL,
@@ -590,7 +606,7 @@ export const registerChatRoutes = async (app: FastifyInstance): Promise<void> =>
              encrypted_media_id = NULL
          WHERE id = $1 AND chat_id = $2 AND (sender_id = $3 OR $4 = 1) AND deleted_at IS NULL
          RETURNING id`,
-        [messageId, chatId, request.user!.id, gate.staff ? 1 : 0]
+        [messageId, chatId, request.user!.id, txGate.staff ? 1 : 0]
         )).rows[0];
         if (deleted) seq = await recordEvent(client, chatId, 'message.deleted', deleted.id);
         await client.query(deleted ? 'COMMIT' : 'ROLLBACK');
