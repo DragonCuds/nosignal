@@ -39,8 +39,14 @@ export type BackupPins = Record<string, string[]>;
 export const MAX_PINS_PER_CONTACT = 32;
 /** Most contacts read from one backup. */
 export const MAX_BACKUP_CONTACTS = 2_000;
-/** Size budget (serialized JSON, bytes) for the pins of one backup. The server accepts a wrapped backup of up to 32 KiB. */
+/** Size budget (serialized JSON, bytes) for the pins of the AUTOMATIC SERVER backup. The server accepts a wrapped backup of up to 32 KiB. */
 export const BACKUP_PINS_BUDGET = 16_000;
+/**
+ * Size budget for the pins of the MANUAL backup FILE. The file is encrypted and saved in the browser and is read back from disk, never
+ * sent to the server, so the 32 KiB server limit does not apply to it. 1 MiB holds the full history of the 2,000 contacts a backup may
+ * carry at the typical one or two pins each (about 330 KB); only an extreme history would be cut, and then it is reported.
+ */
+export const BACKUP_FILE_PINS_BUDGET = 1_048_576;
 
 /** A fingerprint is the SHA-256 of the public key as 64 lowercase hex characters (dmKeys.fingerprintOf). */
 export const isFingerprint = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value);
@@ -63,38 +69,48 @@ export const readBackupPins = (value: unknown): Array<[string, PinList]> => {
 };
 
 /**
- * Merge a contact's pin history from a backup into what this browser already holds.
- * - This browser has a pin: its current pin stays the last entry; backup entries it does not know go in front of its own.
+ * Merge a contact's pin history from a backup into what this browser already holds. NEVER drops an entry this browser has.
+ * - This browser has a pin: its entries stay as they are, its current pin stays the last one; the entries of the backup it does not
+ *   know go in front (at most the newest 32 of them).
  * - This browser has none: the backup order is kept (its last entry becomes the current pin).
- * The result never exceeds 32 entries (oldest dropped).
+ * The 32 limit is only about what is taken from the backup; a longer local list stays intact.
  */
 export const mergePins = (local: PinList, fromBackup: PinList): PinList => {
-  const merged = local.length === 0 ? [...fromBackup] : [...fromBackup.filter((item) => !local.includes(item)), ...local];
-  return merged.slice(-MAX_PINS_PER_CONTACT);
+  const added = fromBackup.filter((item) => !local.includes(item)).slice(-MAX_PINS_PER_CONTACT);
+  return [...added, ...local];
 };
 
 const entrySize = (contactId: string, list: PinList): number => contactId.length + 6 + list.length * 67;
 
+export type PinsForBackup = {
+  pins: BackupPins | undefined;
+  /** How many contacts' histories are not (fully) in `pins`: left out for the size budget or the contact limit, or shortened to the newest 32. */
+  omitted: number;
+};
+
 /**
  * Pins to put into a backup, from what this browser holds (contact id -> list). Unusable entries are left out; each list keeps
  * its newest 32 entries. If everything does not fit the size budget, contacts with a longer history go first (those are the
- * ones whose envelopes would stay locked), then the rest in the order given. Returns undefined when nothing is to be saved.
+ * ones whose envelopes would stay locked), then the rest in the order given. `pins` is undefined when nothing is to be saved.
+ * Nothing is dropped silently: `omitted` counts every contact whose history is not complete in the result.
  */
-export const pinsForBackup = (entries: ReadonlyArray<readonly [string, PinList]>, budget = BACKUP_PINS_BUDGET): BackupPins | undefined => {
-  const usable: Array<[string, PinList]> = [];
+export const pinsForBackup = (entries: ReadonlyArray<readonly [string, PinList]>, budget = BACKUP_PINS_BUDGET): PinsForBackup => {
+  const usable: Array<[string, PinList, boolean]> = [];
   for (const [contactId, list] of entries) {
-    const kept = list.filter(isFingerprint).slice(-MAX_PINS_PER_CONTACT);
-    if (isContactId(contactId) && kept.length > 0) usable.push([contactId, kept]);
+    const valid = list.filter(isFingerprint);
+    const kept = valid.slice(-MAX_PINS_PER_CONTACT);
+    if (isContactId(contactId) && kept.length > 0) usable.push([contactId, kept, kept.length < valid.length]);
   }
   usable.sort((a, b) => Number(b[1].length > 1) - Number(a[1].length > 1));
   const chosen: Array<[string, PinList]> = [];
   let used = 2;
-  for (const [contactId, list] of usable) {
-    if (chosen.length >= MAX_BACKUP_CONTACTS) break;
+  let omitted = 0;
+  for (const [contactId, list, shortened] of usable) {
     const size = entrySize(contactId, list);
-    if (used + size > budget) continue;
+    if (chosen.length >= MAX_BACKUP_CONTACTS || used + size > budget) { omitted += 1; continue; }
     used += size;
     chosen.push([contactId, list]);
+    if (shortened) omitted += 1;
   }
-  return chosen.length === 0 ? undefined : Object.fromEntries(chosen);
+  return { pins: chosen.length === 0 ? undefined : Object.fromEntries(chosen), omitted };
 };

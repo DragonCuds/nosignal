@@ -211,7 +211,7 @@ function SecuritySettings({ open, userId }: { open: boolean; userId: string }) {
 
 type SettingsProps = {
   open: boolean; userId: string; onClose: () => void;
-  getBackup: () => Promise<BackupPayload | null>; onImport: (payload: BackupPayload) => Promise<void>;
+  getBackup: (target?: 'server' | 'file') => Promise<BackupPayload | null>; onImport: (payload: BackupPayload) => Promise<void>;
 };
 
 export function SettingsDialog({ open, userId, getBackup, onImport, onClose }: SettingsProps) {

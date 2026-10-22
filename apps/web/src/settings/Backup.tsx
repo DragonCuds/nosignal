@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { api, ApiError } from '../api.js';
 import { backupFileName, decryptBackup, encryptBackup, fromRecoveryKey, passphraseProblem, toRecoveryKey, type BackupPayload } from '../backup/crypto.js';
+import { backupPinsOmitted, type BackupTarget } from '../e2ee.js';
 import { markBackedUp } from '../backup/reminder.js';
 import { fetchServerBackup, uploadBackup, type ServerBackupState } from '../backup/serverBackup.js';
 import '../backup/backup.css';
@@ -8,7 +9,7 @@ import '../backup/backup.css';
 type Props = {
   userId: string;
   /** e2ee hook: current identity as a payload, or null if it is not exportable. */
-  getBackup: () => Promise<BackupPayload | null>;
+  getBackup: (target?: BackupTarget) => Promise<BackupPayload | null>;
   /** e2ee hook: store imported identity and re-register. */
   onImport: (payload: BackupPayload) => Promise<void>;
 };
@@ -33,7 +34,7 @@ const download = (name: string, text: string) => {
 };
 
 /** Recovery key (text) + passphrase-protected file; used when switching to Power mode and later from Power mode. */
-function RecoveryExport({ userId, payload }: { userId: string; payload: BackupPayload }) {
+function RecoveryExport({ userId, payload, fileOnly = false }: { userId: string; payload: BackupPayload; fileOnly?: boolean }) {
   const [pass, setPass] = useState('');
   const [msg, setMsg] = useState('');
   const key = toRecoveryKey(payload);
@@ -48,10 +49,14 @@ function RecoveryExport({ userId, payload }: { userId: string; payload: BackupPa
   };
   return (
     <div className="group__box">
-      <h4>کلید بازیابی</h4>
-      <textarea className="recovery-text" dir="ltr" rows={4} readOnly value={key} onFocus={(e) => e.currentTarget.select()} aria-label="کلید بازیابی" />
-      <div className="group__actions"><button className="button button--soft" type="button" onClick={() => void copy()}>کپی کلید</button></div>
-      <h4>یا فایل پشتیبان (اختیاری)</h4>
+      {!fileOnly && (
+        <>
+          <h4>کلید بازیابی</h4>
+          <textarea className="recovery-text" dir="ltr" rows={4} readOnly value={key} onFocus={(e) => e.currentTarget.select()} aria-label="کلید بازیابی" />
+          <div className="group__actions"><button className="button button--soft" type="button" onClick={() => void copy()}>کپی کلید</button></div>
+          <h4>یا فایل پشتیبان (اختیاری)</h4>
+        </>
+      )}
       <label className="field"><span>رمز فایل (حداقل ۱۰ نویسه)</span>
         <input type="password" autoComplete="new-password" dir="ltr" value={pass} onChange={(e) => setPass(e.target.value)} />
       </label>
@@ -64,6 +69,10 @@ function RecoveryExport({ userId, payload }: { userId: string; payload: BackupPa
 export function Backup({ userId, getBackup, onImport }: Props) {
   const [server, setServer] = useState<ServerBackupState | 'loading'>('loading');
   const [payload, setPayload] = useState<BackupPayload | null | 'loading'>('loading');
+  // The manual file / recovery export carries the full key history; the automatic server copy has a size limit. Contacts that did not fit are counted.
+  const [filePayload, setFilePayload] = useState<BackupPayload | null>(null);
+  const [omittedServer, setOmittedServer] = useState(0);
+  const [omittedFile, setOmittedFile] = useState(0);
   const [step, setStep] = useState<'idle' | 'to-power' | 'to-auto'>('idle');
   const [saved, setSaved] = useState(false);
   const [password, setPassword] = useState('');
@@ -79,6 +88,8 @@ export function Backup({ userId, getBackup, onImport }: Props) {
   const refresh = useCallback(async () => {
     try { setServer(await fetchServerBackup()); } catch { setServer(null); }
     try { setPayload(await getBackup()); } catch { setPayload(null); }
+    try { setFilePayload(await getBackup('file')); } catch { setFilePayload(null); }
+    try { setOmittedServer(await backupPinsOmitted('server')); setOmittedFile(await backupPinsOmitted('file')); } catch { setOmittedServer(0); setOmittedFile(0); }
     try { setTotpEnabled((await api.securityStatus()).totpEnabled); } catch { /* keep existing state */ }
     try { setEvents(await api.cryptoSecurityEvents()); } catch { /* activity is optional when offline */ }
   }, [getBackup]);
@@ -137,6 +148,7 @@ export function Backup({ userId, getBackup, onImport }: Props) {
 
   if (server === 'loading') return <section dir="rtl" aria-label="پشتیبان کلید"><h3>پشتیبان کلید</h3><p className="group__lead">در حال بارگذاری…</p></section>;
   const exportable = payload !== 'loading' && payload !== null;
+  const fileText = (count: number) => `تاریخچهٔ کلید ${count.toLocaleString('fa-IR')} مخاطب در فایل جا نشد.`;
 
   return (
     <section dir="rtl" aria-label="پشتیبان کلید">
@@ -149,11 +161,24 @@ export function Backup({ userId, getBackup, onImport }: Props) {
             {!exportable ? 'کلید این دستگاه با نسخهٔ قدیمی ساخته شده و قابل پشتیبان‌گیری نیست.'
               : hasCopy ? 'نسخهٔ پشتیبان روی سرور هست.' : 'هنوز نسخه‌ای روی سرور نیست؛ در ورود بعدی با رمز عبور ساخته می‌شود.'}
           </div>
+          {exportable && omittedServer > 0 && (
+            <>
+              <div className="group__notice" role="status">تاریخچهٔ کلید {omittedServer.toLocaleString('fa-IR')} مخاطب در نسخهٔ سرور جا نشد؛ فایل پشتیبان دستی را دریافت کنید.</div>
+              {filePayload && (
+                <details className="group__box">
+                  <summary>دریافت فایل پشتیبان دستی</summary>
+                  {omittedFile > 0 && <p>{fileText(omittedFile)}</p>}
+                  <RecoveryExport userId={userId} payload={filePayload} fileOnly />
+                </details>
+              )}
+            </>
+          )}
           {step !== 'to-power' && <div className="group__actions"><button className="button button--soft" type="button" disabled={!exportable} onClick={() => { setStep('to-power'); setMsg(''); }}>روشن کردن حالت امنیت بیشتر</button></div>}
           {step === 'to-power' && exportable && (
             <div className="group__box">
               <p><strong>حالت امنیت بیشتر:</strong> نسخهٔ سرور پاک می‌شود و فقط خودتان با «کلید بازیابی» می‌توانید پیام‌های قبلی را در دستگاه جدید باز کنید. اگر آن را گم کنید، هیچ‌کس نمی‌تواند کمکتان کند و پیام‌های قبلی برای همیشه ناخواناست. اول کلید را ذخیره کنید:</p>
-              <RecoveryExport userId={userId} payload={payload} />
+              {filePayload && omittedFile > 0 && <div className="group__notice" role="status">{fileText(omittedFile)}</div>}
+              <RecoveryExport userId={userId} payload={filePayload ?? payload} />
               <label className="backup-check"><input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} /><span>کلید بازیابی را جای امنی ذخیره کردم.</span></label>
               <label className="field"><span>رمز عبور حساب</span><input type="password" autoComplete="current-password" dir="ltr" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
               {totpEnabled && <label className="field"><span>کد دومرحله‌ای یا بازیابی</span><input autoComplete="one-time-code" dir="ltr" value={secondFactor} onChange={(e) => setSecondFactor(e.target.value)} /></label>}
@@ -168,7 +193,8 @@ export function Backup({ userId, getBackup, onImport }: Props) {
       {power && (
         <>
           <p className="group__lead"><strong>حالت امنیت بیشتر روشن است.</strong> هیچ نسخه‌ای از کلید روی سرور نیست و رمز عبور شما به‌تنهایی کلید را باز نمی‌کند. در دستگاه جدید باید کلید بازیابی یا فایل پشتیبان را وارد کنید؛ اگر هر دو را گم کنید، پیام‌های قبلی برای همیشه ناخواناست.</p>
-          {exportable ? <RecoveryExport userId={userId} payload={payload} /> : <div className="group__notice group__notice--error">کلید این دستگاه با نسخهٔ قدیمی ساخته شده و قابل نمایش نیست.</div>}
+          {exportable && filePayload && omittedFile > 0 && <div className="group__notice" role="status">{fileText(omittedFile)}</div>}
+          {exportable && filePayload ? <RecoveryExport userId={userId} payload={filePayload} /> : <div className="group__notice group__notice--error">کلید این دستگاه با نسخهٔ قدیمی ساخته شده و قابل نمایش نیست.</div>}
           {step !== 'to-auto'
             ? <div className="group__actions"><button className="button button--soft" type="button" onClick={() => { setStep('to-auto'); setMsg(''); }}>بازگشت به حالت خودکار</button></div>
             : (
