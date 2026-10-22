@@ -83,7 +83,7 @@ await build({
 
 // A fake IndexedDB: enough of the API surface e2ee.ts uses (open, transaction, objectStore get/put/delete). One per "browser profile".
 const makeIdb = () => {
-  const stores = { identities: new Map(), pins: new Map() };
+  const stores = { identities: new Map(), pins: new Map(), keyFloors: new Map() };
   const open = () => {
     const request = {};
     queueMicrotask(() => {

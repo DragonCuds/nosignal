@@ -74,9 +74,17 @@ export const registerCryptoRoutes = async (app: FastifyInstance): Promise<void> 
   // Members' CURRENT identities, the caller's envelopes (newest versions first) and the key version state.
   // Each envelope carries the sender's public key as it was when the envelope was wrapped: the browser opens an old
   // version with that key only if its fingerprint was pinned before (the server is not trusted for this).
-  app.get<{ Params: { id: string } }>('/api/chats/:id/crypto', { preHandler: app.requireUser, config: { rateLimit: READ_LIMIT } }, async (request, reply) => {
+  // `?version=N` returns only the caller's envelope of that one version (empty list if none): the list is capped at the newest
+  // MAX_ENVELOPE_VERSIONS, so this is how a browser reaches a version older than that cap.
+  app.get<{ Params: { id: string }; Querystring: { version?: unknown } }>('/api/chats/:id/crypto', { preHandler: app.requireUser, config: { rateLimit: READ_LIMIT } }, async (request, reply) => {
     const chatId = id(request.params.id);
     if (!chatId || !(await isMember(chatId, request.user!.id))) return reply.code(404).send({ error: 'Chat not found' });
+    const wanted = request.query.version;
+    let onlyVersion: number | null = null;
+    if (wanted !== undefined) {
+      if (typeof wanted !== 'string' || !/^[1-9]\d{0,6}$/.test(wanted) || Number(wanted) > MAX_KEY_VERSION) return reply.code(400).send({ error: 'version must be a positive number' });
+      onlyVersion = Number(wanted);
+    }
     const members = await db.query<{ user_id: string; public_jwk: JsonWebKey | null; fingerprint: string | null }>(
       `SELECT cm.user_id, ci.public_jwk, ci.fingerprint FROM chat_members cm
        LEFT JOIN user_crypto_identities ci ON ci.user_id = cm.user_id
@@ -84,7 +92,7 @@ export const registerCryptoRoutes = async (app: FastifyInstance): Promise<void> 
     const state = await directKeyState(chatId);
     const rows = await db.query<{ sender_id: string; version: number; nonce: string; ciphertext: string; sender_fingerprint: string | null; sender_public_jwk: string | null }>(
       `SELECT sender_id, version, nonce, ciphertext, sender_fingerprint, sender_public_jwk FROM chat_key_envelopes
-       WHERE chat_id = $1 AND recipient_id = $2 ORDER BY version DESC LIMIT ${MAX_ENVELOPE_VERSIONS}`, [chatId, request.user!.id]);
+       WHERE chat_id = $1 AND recipient_id = $2 AND ($3 IS NULL OR version = $3) ORDER BY version DESC LIMIT ${MAX_ENVELOPE_VERSIONS}`, [chatId, request.user!.id, onlyVersion]);
     const envelopes = rows.rows.map((row) => ({
       senderId: row.sender_id, version: row.version, nonce: row.nonce, ciphertext: row.ciphertext,
       senderFingerprint: row.sender_fingerprint, senderPublicKey: parseJwk(row.sender_public_jwk)
@@ -105,6 +113,7 @@ export const registerCryptoRoutes = async (app: FastifyInstance): Promise<void> 
     const chatId = id(request.params.id);
     if (!chatId || !(await isMember(chatId, request.user!.id))) return reply.code(404).send({ error: 'Chat not found' });
     if ((await db.query('SELECT 1 FROM groups WHERE chat_id = $1', [chatId])).rowCount === 1) return reply.code(409).send({ error: 'Group chats use /api/groups/:id/keys' });
+    // (ORDER BY gives numeric order, `.sort()` text order: compare both sorted the same way, or chats between ids 9 and 10, 99 and 100... fail)
     const members = (await db.query<{ user_id: string }>('SELECT user_id FROM chat_members WHERE chat_id = $1 ORDER BY user_id', [chatId])).rows.map((row) => row.user_id);
     // Direct chat: one envelope per member (2). Saved Messages: a single member, one envelope to itself.
     const expected = (await db.query('SELECT 1 FROM saved_chats WHERE chat_id = $1', [chatId])).rowCount === 1 ? 1 : 2;
@@ -114,7 +123,7 @@ export const registerCryptoRoutes = async (app: FastifyInstance): Promise<void> 
     }
     if (!Array.isArray(request.body?.envelopes) || request.body.envelopes.length !== expected) return reply.code(400).send({ error: 'An envelope is required for every chat member' });
     const parsed = request.body.envelopes.map((item) => object(item) && id(item.recipientId) && isFingerprint(item.recipientFingerprint) && (item.version === undefined || item.version === version) && b64(item.nonce, 16, 32) && b64(item.ciphertext, 40, 256) ? item as EnvelopeItem : null);
-    if (parsed.some((item) => !item) || members.length !== expected || parsed.map((item) => item!.recipientId).sort().join(',') !== members.join(',')) return reply.code(400).send({ error: 'Invalid envelope set' });
+    if (parsed.some((item) => !item) || members.length !== expected || parsed.map((item) => item!.recipientId).sort().join(',') !== [...members].sort().join(',')) return reply.code(400).send({ error: 'Invalid envelope set' });
     const userId = request.user!.id;
     const client = await db.connect();
     try {
