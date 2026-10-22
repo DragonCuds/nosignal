@@ -578,6 +578,8 @@ type GroupCtx = {
   members: Map<string, JsonWebKey | null>; detail?: GroupDetail; misses: Map<number, number>;
   /** Versions whose envelope is from a wrapper who is a member NOW and whose key is trusted today: only these may become `latest`. */
   sendable: Set<number>;
+  /** S10b: per sendable version, who wrapped it and the fingerprint of the wrapper's key that opened it (ourselves: our own). */
+  wrappers: Map<number, { id: string; fingerprint: string }>;
 };
 const groupCtxs = new Map<string, GroupCtx>();
 const KEY_RECHECK_MS = 3_000;
@@ -595,7 +597,7 @@ const groupCtx = (chatId: string, groupId?: string): GroupCtx => {
   const id = groupId ?? groupOfChat.get(chatId);
   if (!id) throw new Error('Not a group chat');
   let ctx = groupCtxs.get(id);
-  if (!ctx) { ctx = { groupId: id, chatId, keys: new Map(), raws: new Map(), latest: 0, checkedAt: 0, members: new Map(), misses: new Map(), sendable: new Set() }; groupCtxs.set(id, ctx); }
+  if (!ctx) { ctx = { groupId: id, chatId, keys: new Map(), raws: new Map(), latest: 0, checkedAt: 0, members: new Map(), misses: new Map(), sendable: new Set(), wrappers: new Map() }; groupCtxs.set(id, ctx); }
   return ctx;
 };
 const loadGroupDetail = async (ctx: GroupCtx): Promise<GroupDetail> => {
@@ -645,7 +647,11 @@ const absorbGroupKeys = async (ctx: GroupCtx, entries: GroupKeyEntry[]): Promise
       }));
       ctx.raws.set(entry.version, raw);
       ctx.keys.set(entry.version, await crypto.subtle.importKey('raw', buffer(raw), 'AES-GCM', false, ['encrypt', 'decrypt']));
-      if (sender.current && ctx.members.has(entry.wrappedBy)) { ctx.sendable.add(entry.version); ctx.latest = Math.max(ctx.latest, entry.version); }
+      if (sender.current && ctx.members.has(entry.wrappedBy)) {
+        ctx.sendable.add(entry.version);
+        ctx.wrappers.set(entry.version, { id: entry.wrappedBy, fingerprint: await fingerprint(sender.publicKey) });
+        ctx.latest = Math.max(ctx.latest, entry.version);
+      }
     } catch { /* this envelope is unusable (changed identity or corrupt); skip it */ }
   }
 };
@@ -660,6 +666,55 @@ const currentGroupKey = async (chatId: string): Promise<{ key: CryptoKey; versio
   if (!key) throw new Error('کلید گروه هنوز آماده نیست؛ کمی بعد دوباره تلاش کنید.');
   return { key, version: ctx.latest };
 };
+const GROUP_KEY_NOT_READY = 'کلید گروه هنوز آماده نیست؛ کمی بعد دوباره تلاش کنید.';
+// Fingerprint per public key (x, y), so a large group is hashed once, not on every send.
+const memberFingerprints = new Map<string, Promise<string>>();
+const cachedFingerprint = (jwk: JsonWebKey): Promise<string> => {
+  const id = JSON.stringify([jwk.x, jwk.y]);
+  let found = memberFingerprints.get(id);
+  if (!found) {
+    if (memberFingerprints.size > 4_096) memberFingerprints.clear();
+    found = fingerprint(jwk);
+    memberFingerprints.set(id, found);
+    found.catch(() => memberFingerprints.delete(id));
+  }
+  return found;
+};
+/** Current pins of several contacts in one IndexedDB transaction (read only). */
+const readCurrentPins = async (memberIds: string[]): Promise<Map<string, string | undefined>> => {
+  const db = await openDb();
+  try {
+    const store = db.transaction('pins').objectStore('pins');
+    const entries = await Promise.all(memberIds.map((memberId) => new Promise<[string, string | undefined]>((resolve, reject) => {
+      const request = store.get(pinKey(memberId));
+      request.onsuccess = () => resolve([memberId, currentPin(normalizePins(request.result as unknown))]);
+      request.onerror = () => reject(request.error);
+    })));
+    return new Map(entries);
+  } finally { db.close(); }
+};
+/**
+ * S10b, right before a group key is handed out for NEW messages, with the same fresh `detail` that was just checked:
+ *  - R3: whoever wrapped `ctx.latest` is ourselves, or a member NOW whose current pin is still the key that opened the envelope
+ *    (a cached "sendable" is not a permanent permission: the wrapper may have left or changed identity since).
+ *  - R4: every current member we have a pin for still has that key (like verifyMembers for direct chats). Unpinned members are not
+ *    pinned here (trust on first use stays as it was).
+ * Reading old messages does not go through here.
+ */
+const checkGroupSendState = async (ctx: GroupCtx, detail: GroupDetail): Promise<void> => {
+  if (!identity) throw new Error('Encryption identity is not initialized');
+  const others = detail.members.filter((member) => member.id !== identity!.userId);
+  const pins = await readCurrentPins(others.map((member) => member.id));
+  const wrapper = ctx.wrappers.get(ctx.latest);
+  if (!wrapper) throw new Error(GROUP_KEY_NOT_READY);
+  if (wrapper.id !== identity.userId && (!others.some((member) => member.id === wrapper.id) || pins.get(wrapper.id) !== wrapper.fingerprint)) throw new Error(GROUP_KEY_NOT_READY);
+  for (const member of others) {
+    const pinned = pins.get(member.id);
+    if (!pinned || !member.publicKey) continue;
+    const actual = await cachedFingerprint(member.publicKey);
+    if (actual !== pinned) throw new KeyChangedError(member.id, pinned, actual);
+  }
+};
 /**
  * The key for NEW group messages (S9a). Besides the key itself, the group's current state is checked: no rotation may be pending,
  * the key must be at least the group's current version, and not below this browser's floor. Whatever the server returned as
@@ -672,7 +727,8 @@ const sendGroupKey = async (chatId: string): Promise<{ key: CryptoKey; version: 
   }
   const detail = ctx.detail;
   const key = ctx.sendable.has(ctx.latest) ? ctx.keys.get(ctx.latest) : undefined;
-  if (!detail || !key || detail.pendingKeyVersion != null || ctx.latest < detail.keyVersion) throw new Error('کلید گروه هنوز آماده نیست؛ کمی بعد دوباره تلاش کنید.');
+  if (!detail || !key || detail.pendingKeyVersion != null || ctx.latest < detail.keyVersion) throw new Error(GROUP_KEY_NOT_READY);
+  await checkGroupSendState(ctx, detail); // S10b: wrapper still valid (R3), every pinned member's key still matches its pin (R4)
   if (ctx.latest < (await readFloor(chatId)).floor) throw new ChatKeyRollbackError();
   await raiseFloor(chatId, { used: ctx.latest });
   return { key, version: ctx.latest };
@@ -705,6 +761,7 @@ const uploadGroupKey = async (ctx: GroupCtx, detail: GroupDetail, version: numbe
   ctx.keys.set(version, await crypto.subtle.importKey('raw', buffer(raw), 'AES-GCM', false, ['encrypt', 'decrypt']));
   ctx.latest = Math.max(ctx.latest, version);
   ctx.sendable.add(version);
+  ctx.wrappers.set(version, { id: identity.userId, fingerprint: identity.fingerprint });
   ctx.detail = { ...detail, keyVersion: Math.max(detail.keyVersion, version), pendingKeyVersion: null }; // the server accepted this version
   ctx.checkedAt = Date.now();
 };
