@@ -3,6 +3,7 @@
 import { api, ApiError, type Message, type OutboundEncryptedPayload, type StickerMessagePayload, type GifMessagePayload } from './api.js';
 import { db, safe, type OutboxRow } from './db.js';
 import { isStaleKeyError } from './keyErrors.js';
+import { grantPackAfterSend, resetPackGrants } from './stickerGrant.js';
 
 export type { OutboxRow } from './db.js';
 export type EnqueueInput = Omit<OutboxRow, 'state' | 'attempts' | 'nextAttemptAt' | 'createdAt'> & { createdAt?: number };
@@ -113,6 +114,7 @@ const run = async (row: OutboxRow) => {
     mem.delete(row.clientMsgId);
     await unpersist(row.clientMsgId);
     emit(row.chatId);
+    grantPackAfterSend(sent); // sticker packs are shared into the chat only once the server accepted the message
     for (const cb of sentListeners) { try { cb(sent, message); } catch { /* ignore */ } }
   } catch (error) {
     const attempts = row.attempts + 1;
@@ -230,6 +232,7 @@ export const startOutbox = (): (() => void) => {
     // The queue belongs to one signed-in user: never carry rows or in-flight markers over to the next account in this tab.
     mem.clear();
     inflight.clear();
+    resetPackGrants();
   };
   return started;
 };

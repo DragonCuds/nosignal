@@ -5,16 +5,6 @@ import { faNumber } from '../ui.js';
 
 export type PackTarget = { chatId: string; packId: string };
 
-// The server learns "pack P was shared into chat C" once, so members of C can open P. Cached per session; a failure
-// is forgotten so the next sticker from that pack tries again. Never blocks or fails a send.
-const granted = new Set<string>();
-export const sharePackInChat = (chatId: string, packId: string): void => {
-  const key = `${chatId}:${packId}`;
-  if (!packId || granted.has(key)) return;
-  granted.add(key);
-  void api.grantStickerPack(chatId, packId).catch(() => granted.delete(key));
-};
-
 const failure = (error: unknown, adding: boolean): string => {
   if (error instanceof ApiError && error.status === 404) return 'این بسته در دسترس نیست.';
   if (error instanceof ApiError && error.status === 413) return 'حداکثر ۲۰ بستهٔ استیکر می‌توانید داشته باشید. اول یکی را حذف کنید.';
