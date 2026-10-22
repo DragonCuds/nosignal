@@ -57,6 +57,7 @@ try {
   run.check('backup removed so the new browser cannot restore', del.status === 204, String(del.status));
   const B2 = await fresh(browser, 'B2', 1000, 800); await goto(B2, BASE); await login(B2, NB);
   run.check('recovery screen appears', await waitFor(B2, 'کلید رمزنگاری این دستگاه پیدا نشد', 30000));
+  await waitFor(B2, 'تحت‌تأثیر', 10000); // the affected-chat count is fetched after the screen shows
   const body = await text(B2);
   run.check('screen says how many chats are touched', /۱ گفتگوی شما تحت‌تأثیر قرار می‌گیرد/.test(body), body.slice(body.indexOf('شروع تازه'), body.indexOf('شروع تازه') + 300));
   run.check('screen says contacts keep their history and you start fresh', body.includes('مخاطب‌های شما تاریخچهٔ گفتگو را نگه می‌دارند و شما از نو شروع می‌کنید'));
