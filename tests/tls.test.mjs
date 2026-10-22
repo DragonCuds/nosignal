@@ -72,6 +72,29 @@ test('ensureLocalCertificate: EC P-256 CA + server cert with SAN, verifies, keys
   assert.equal(statSync(files.caKey).mode & 0o777, 0o600);
 });
 
+test('renew and regenerate keep certificates at 0644 and keys at 0600 under a permissive umask', () => {
+  const previous = process.umask(0o002);
+  try {
+    const dataDir = tmp();
+    ensureLocalCertificate(dataDir, ['example.test']);
+    const renewed = ensureLocalCertificate(dataDir, ['example.test'], { force: true });
+    assert.equal(renewed.issued, true);
+    assert.equal(renewed.newCa, false);
+    assert.equal(statSync(renewed.files.crt).mode & 0o777, 0o644);
+    assert.equal(statSync(renewed.files.caCrt).mode & 0o777, 0o644);
+    assert.equal(statSync(renewed.files.key).mode & 0o777, 0o600);
+    assert.equal(statSync(renewed.files.caKey).mode & 0o777, 0o600);
+
+    const regenerated = regenerateLocalCa(dataDir, ['example.test']);
+    assert.equal(statSync(regenerated.files.crt).mode & 0o777, 0o644);
+    assert.equal(statSync(regenerated.files.caCrt).mode & 0o777, 0o644);
+    assert.equal(statSync(regenerated.files.key).mode & 0o777, 0o600);
+    assert.equal(statSync(regenerated.files.caKey).mode & 0o777, 0o600);
+  } finally {
+    process.umask(previous);
+  }
+});
+
 test('second call keeps the cert; changed hosts require planned CA replacement; leaf renewal keeps CA', () => {
   const dataDir = tmp();
   const first = ensureLocalCertificate(dataDir, ['localhost']);
