@@ -18,6 +18,8 @@ export type OutboxRow = {
   attempts: number;
   nextAttemptAt: number;
   error?: string;
+  /** Sticker rows only: the pack to share into the chat once the server accepted the message. Not part of the message body; the plaintext payload is never stored. */
+  grantPackId?: string;
   /** How many times this row was re-encrypted because the chat key version moved on (NS-07). */
   rekeys?: number;
 };
