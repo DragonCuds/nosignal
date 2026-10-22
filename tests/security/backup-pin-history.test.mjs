@@ -9,7 +9,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { after, before, test } from 'node:test';
-import { pinsForBackup, readBackupPins, mergePins, isFingerprint, MAX_PINS_PER_CONTACT, BACKUP_PINS_BUDGET } from '../../apps/web/src/pins.ts';
+import { pinsForBackup, readBackupPins, mergePins, isFingerprint, MAX_PINS_PER_CONTACT, MAX_BACKUP_CONTACTS, BACKUP_PINS_BUDGET, BACKUP_FILE_PINS_BUDGET } from '../../apps/web/src/pins.ts';
 import { encryptBackup, decryptBackup, wrapForServer, unwrapFromServer } from '../../apps/web/src/backup/crypto.ts';
 
 const root = path.resolve(import.meta.dirname, '../..');
@@ -310,29 +310,140 @@ test('pure rules: readBackupPins, mergePins, pinsForBackup', () => {
   assert.deepEqual(mergePins([b], [a, b]), [a, b]);
   assert.deepEqual(mergePins([a], [b]), [b, a]);
   const many = Array.from({ length: 40 }, (_, i) => i.toString(16).padStart(64, '0'));
-  assert.deepEqual(mergePins([many[39]], many.slice(0, 32)).at(-1), many[39], 'cap keeps the newest, local current last');
-  assert.equal(mergePins([many[39]], many.slice(0, 32)).length, MAX_PINS_PER_CONTACT);
+  assert.deepEqual(mergePins([many[39]], many.slice(0, 32)).at(-1), many[39], 'local current last');
+  assert.equal(mergePins([many[39]], many.slice(0, 32)).length, MAX_PINS_PER_CONTACT + 1, 'the 32 limit is about what the backup adds, the local entry is on top of it');
+  assert.deepEqual(mergePins([many[39]], many.slice(0, 40).filter((x) => x !== many[39])), [...many.slice(7, 39), many[39]], 'at most the newest 32 of the backup are added');
+  assert.deepEqual(mergePins([], many), many.slice(8), 'no local pin: the newest 32 of the backup');
+  assert.deepEqual(mergePins(many, many.slice(0, 5)), many, 'a local list longer than 32 stays intact');
+  assert.deepEqual(mergePins(many, [FP(900), FP(901)]), [FP(900), FP(901), ...many], 'unknown backup entries go in front of an intact local list');
 
-  assert.equal(pinsForBackup([]), undefined);
-  assert.equal(pinsForBackup([['1', ['nope']]]), undefined);
+  assert.deepEqual(pinsForBackup([]), { pins: undefined, omitted: 0 });
+  assert.deepEqual(pinsForBackup([['1', ['nope']]]), { pins: undefined, omitted: 0 });
   const capped = pinsForBackup([['1', many]]);
-  assert.equal(capped['1'].length, MAX_PINS_PER_CONTACT);
-  assert.equal(capped['1'].at(-1), many[39], 'the newest 32, current last');
+  assert.equal(capped.pins['1'].length, MAX_PINS_PER_CONTACT);
+  assert.equal(capped.pins['1'].at(-1), many[39], 'the newest 32, current last');
+  assert.equal(capped.omitted, 1, 'a shortened history is reported');
 
   // lots of contacts: within the budget, the ones with a history come first
   const entries = Array.from({ length: 1_000 }, (_, i) => [String(100_000 + i), [i.toString(16).padStart(64, '1')]]);
   entries.push(['999999', [a, b]]);
-  const packed = pinsForBackup(entries);
+  const { pins: packed, omitted } = pinsForBackup(entries);
   assert.ok(JSON.stringify(packed).length <= BACKUP_PINS_BUDGET, 'within the budget');
   assert.deepEqual(packed['999999'], [a, b], 'a contact with a history is kept even though it came last');
   assert.ok(Object.keys(packed).length < 1_001, 'the budget cut something');
+  assert.equal(omitted, 1_001 - Object.keys(packed).length, 'every contact that did not fit is counted');
+  const roomy = pinsForBackup(entries, BACKUP_FILE_PINS_BUDGET);
+  assert.equal(Object.keys(roomy.pins).length, 1_001);
+  assert.equal(roomy.omitted, 0);
+  // the contact limit and the file budget also report instead of dropping silently
+  const huge = Array.from({ length: MAX_BACKUP_CONTACTS + 5 }, (_, i) => [String(200_000 + i), [FP(i + 1)]]);
+  assert.equal(pinsForBackup(huge, BACKUP_FILE_PINS_BUDGET).omitted, 5);
+  assert.equal(pinsForBackup(huge, 1_000).omitted, huge.length - Object.keys(pinsForBackup(huge, 1_000).pins).length);
 });
 
 test('the biggest backup the client will build is accepted by the server\'s blob limit', async () => {
   const entries = Array.from({ length: 2_000 }, (_, i) => [`${i}`.padStart(8, '9'), [`${i}`.padStart(64, 'c'), `${i}`.padStart(64, 'e')]]);
-  const payload = { ...S.payload, pins: pinsForBackup(entries) };
+  const payload = { ...S.payload, pins: pinsForBackup(entries).pins };
   const blob = await wrapForServer(payload, PASSWORD);
   assert.ok(parseBackupBlob(blob), `wrapped length ${blob.wrapped.length}`);
   assert.ok(blob.wrapped.length < 32 * 1024);
   assert.ok(JSON.stringify({ ...blob, expectedUserId: '1', password: PASSWORD, expectedRevision: 1, actionToken: 'x'.repeat(100) }).length < 48 * 1024, 'fits the request body limit');
+});
+
+// ---- S10c (R5): a merge never drops local pins; the manual file is complete; what the server copy leaves out is counted ---------------------------------
+
+test('R5-1: 33 local pins, backup made and imported into the same profile: all 33 stay and the oldest envelope still opens', async () => {
+  const profile = 'alice-33';
+  const [b1, b2] = S.history;
+  const fillers = Array.from({ length: 31 }, (_, i) => FP(0xf00 + i).replaceAll('0', 'c'));
+  const local = [b1, ...fillers, b2];
+  assert.equal(local.length, 33);
+  assert.equal(new Set(local).size, 33);
+  const first = await restoreInto('alice33a', 'alice', profile, { ...S.payload, pins: undefined });
+  const key = `${ids.alice}:${ids.bob}`;
+  profileOf('alice33a').stores.pins.set(key, [...local]);
+  const before = await readAll(first, 'alice', S.chat);
+  assert.ok(!before.includes(LOCKED), 'the oldest envelope opens before the roundtrip');
+  const backup = await as(first, (m) => m.getBackup());
+  assert.equal(backup.pins[String(ids.bob)].length, MAX_PINS_PER_CONTACT, 'the server-sized backup holds the newest 32');
+  const second = await fresh('alice33b', 'alice', profile);
+  await as(second, (m) => m.importIdentity(backup));
+  assert.deepEqual(profileOf('alice33b').stores.pins.get(key), local, 'all 33 remain, in the same order, current pin last');
+  assert.ok(!(await readAll(second, 'alice', S.chat)).includes(LOCKED), 'an envelope wrapped with the oldest identity still opens');
+});
+
+test('R5-1: a restore into a profile with its own history only ever adds', async () => {
+  const profile = 'alice-adds';
+  const [x, y, z] = [FP(0xaa1), FP(0xaa2), FP(0xaa3)].map((v) => v.replaceAll('0', 'a'));
+  const long = Array.from({ length: 40 }, (_, i) => i.toString(16).padStart(64, '5'));
+  await fresh('aliceAdds0', 'alice', profile);
+  profileOf('aliceAdds0').stores.pins.set(`${ids.alice}:700`, long);
+  profileOf('aliceAdds0').stores.pins.set(`${ids.alice}:701`, [x]);
+  const browser = await fresh('aliceAdds1', 'alice', profile);
+  await as(browser, (m) => m.importIdentity({ ...S.payload, pins: { 700: long.slice(-5), 701: [y, z] } }));
+  assert.deepEqual(profileOf('aliceAdds1').stores.pins.get(`${ids.alice}:700`), long, 'a local list longer than 32 is untouched');
+  assert.deepEqual(profileOf('aliceAdds1').stores.pins.get(`${ids.alice}:701`), [y, z, x], 'new entries in front, the local current pin still last');
+});
+
+test('R5-2: 250 contacts with two pins each: the manual file has all of them, the server copy says how many did not fit', async () => {
+  const profile = 'alice-250';
+  const browser = await restoreInto('alice250', 'alice', profile, { ...S.payload, pins: undefined });
+  const pins = profileOf('alice250').stores.pins;
+  const expected = new Map();
+  for (let i = 0; i < 250; i += 1) {
+    const list = [`${i}a`.padStart(64, '1'), `${i}b`.padStart(64, '2')];
+    pins.set(`${ids.alice}:${300_000 + i}`, list);
+    expected.set(String(300_000 + i), list);
+  }
+  const file = await as(browser, (m) => m.getBackup('file'));
+  assert.equal(Object.keys(file.pins).length, 250, 'the manual file holds every contact');
+  for (const [contact, list] of expected) assert.deepEqual(file.pins[contact], list);
+  assert.equal(await as(browser, (m) => m.backupPinsOmitted('file')), 0, 'nothing to report for the file');
+  assert.ok(JSON.stringify(file.pins).length <= BACKUP_FILE_PINS_BUDGET);
+
+  const server = await as(browser, (m) => m.getBackup());
+  const kept = Object.keys(server.pins).length;
+  assert.ok(kept < 250, 'the server copy cannot hold all of them');
+  assert.ok(JSON.stringify(server.pins).length <= BACKUP_PINS_BUDGET);
+  const omitted = await as(browser, (m) => m.backupPinsOmitted('server'));
+  assert.ok(omitted > 0);
+  assert.equal(omitted, 250 - kept, 'the number told to the user is exact');
+  assert.deepEqual((await as(browser, (m) => m.exportLocalIdentity(String(ids.alice)))).pins, server.pins, 'the automatic backup is the server kind');
+  const blob = await wrapForServer(server, PASSWORD);
+  assert.ok(parseBackupBlob(blob), 'the server copy is within the server limit');
+
+  // the real file path: encrypt, decrypt, restore into an empty profile: every contact's history is back
+  const text = await encryptBackup(file, 'a long passphrase here', 100_000);
+  const restored = await decryptBackup(text, 'a long passphrase here');
+  await restoreInto('alice250b', 'alice', 'alice-250-restored', restored);
+  for (const [contact, list] of expected) assert.deepEqual(profileOf('alice250b').stores.pins.get(`${ids.alice}:${contact}`), list);
+});
+
+test('R5-2: a file history that does not fit even the file budget is reported, not dropped silently', async () => {
+  const entries = Array.from({ length: 200 }, (_, i) => [String(500_000 + i), Array.from({ length: 32 }, (_, k) => (i * 32 + k).toString(16).padStart(64, "d"))]);
+  const { pins, omitted } = pinsForBackup(entries, 100_000);
+  assert.ok(omitted > 0 && omitted === 200 - Object.keys(pins).length);
+});
+
+test('compatibility: a backup in the S9b format (pins, at most 32 per contact) and one without pins both restore; a foreign pin never becomes current', async () => {
+  const bobId = String(ids.bob);
+  const s9b = await decryptBackup(await encryptBackup({ ...S.payload, pins: { [bobId]: S.history } }, 'a long passphrase here', 100_000), 'a long passphrase here');
+  const a = await restoreInto('alice6', 'alice', 'alice-s9b', s9b);
+  assert.deepEqual(pinsOf('alice6', 'alice', 'bob'), S.history);
+  assert.ok(!(await readAll(a, 'alice', S.chat)).includes(LOCKED));
+  const { pins: dropped, ...noPins } = S.payload;
+  assert.ok(dropped);
+  await restoreInto('alice7', 'alice', 'alice-nopins', noPins);
+  assert.equal(pinsOf('alice7', 'alice', 'bob'), undefined);
+
+  // R5 "tampered backup": the foreign fingerprint E is added to the history, the local current pin stays current
+  const e = 'e'.repeat(64);
+  const local = S.history.at(-1);
+  const tampered = await restoreInto('alice8', 'alice', 'alice-tampered', { ...S.payload, pins: undefined });
+  profileOf('alice8').stores.pins.set(`${ids.alice}:${ids.bob}`, [local]);
+  const merged = await fresh('alice8b', 'alice', 'alice-tampered');
+  await as(merged, (m) => m.importIdentity({ ...S.payload, pins: { [bobId]: [e] } }));
+  void tampered;
+  assert.deepEqual(pinsOf('alice8b', 'alice', 'bob'), [e, local], 'E joins the history, the local current pin is still last');
+  assert.deepEqual(await as(merged, (m) => m.checkKeyChanges(S.chat)), [], 'bob\'s real key is still the current one');
 });

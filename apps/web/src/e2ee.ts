@@ -3,7 +3,7 @@ import { api, ApiError, type ChatCryptoState, type ChatMessageSummary, type Mess
 import { groupsApi, type GroupDetail, type GroupKeyEntry } from './groups/groupsApi.js';
 import { isStaleKeyError } from './keyErrors.js';
 import { b64ToBytes, bytesToB64, fingerprintOf, openEnvelopes, senderKeyFor, unwrapChatKey, wrapChatKey, type OpenedKey } from './dmKeys.js';
-import { acceptPin, currentPin, isLegacyPin, mergePins, normalizePins, pinsForBackup, readBackupPins, type PinList } from './pins.js';
+import { acceptPin, BACKUP_FILE_PINS_BUDGET, BACKUP_PINS_BUDGET, currentPin, isLegacyPin, mergePins, normalizePins, pinsForBackup, readBackupPins, type PinList } from './pins.js';
 
 type Content = Pick<ChatMessageSummary, 'kind' | 'text' | 'payload'>;
 type StoredIdentity = { userId: string; privateKey: CryptoKey; publicKey: JsonWebKey; fingerprint: string };
@@ -345,13 +345,27 @@ export const initializeIdentity = async (userId: string, wrap?: (payload: Backup
 
 export const initializeEncryption = async (userId: string): Promise<string> => (await initializeIdentity(userId)).fingerprint;
 
+/**
+ * Which backup is being built. 'server' is the automatic backup: the server accepts at most 32 KiB, so the pin history is held to a
+ * 16 KB budget. 'file' is the manual file / recovery export: it is saved on the user's disk and never sent to the server, so it carries
+ * the full pin history up to a separate, much larger budget.
+ */
+export type BackupTarget = 'server' | 'file';
+const pinBudget = (target: BackupTarget): number => (target === 'file' ? BACKUP_FILE_PINS_BUDGET : BACKUP_PINS_BUDGET);
+
 /** Current identity as a backup payload; null only for an old key that an earlier version stored non-extractable. */
-export const getBackup = async (): Promise<BackupPayload | null> => {
+export const getBackup = async (target: BackupTarget = 'server'): Promise<BackupPayload | null> => {
   if (!identity) return null;
-  return payloadOf(identity, sessionPrivateJwk);
+  return payloadOf(identity, sessionPrivateJwk, target);
 };
 
-const payloadOf = async (record: StoredIdentity, known?: JsonWebKey): Promise<BackupPayload | null> => {
+/** How many contacts' key histories would NOT be complete in a backup of that kind (0 when everything fits). For the Settings notice. */
+export const backupPinsOmitted = async (target: BackupTarget): Promise<number> => {
+  if (!identity) return 0;
+  return pinsForBackup(await readAllPins(identity.userId).catch(() => []), pinBudget(target)).omitted;
+};
+
+const payloadOf = async (record: StoredIdentity, known?: JsonWebKey, target: BackupTarget = 'server'): Promise<BackupPayload | null> => {
   let jwk = known;
   if (jwk?.d === undefined) {
     if (!record.privateKey.extractable) return null;
@@ -359,13 +373,13 @@ const payloadOf = async (record: StoredIdentity, known?: JsonWebKey): Promise<Ba
   }
   const payload: BackupPayload = { userId: record.userId, publicKey: record.publicKey, privateKey: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, d: jwk.d } };
   // The pin history goes along, so a restored browser can open envelopes a contact wrapped with an identity this user had accepted.
-  // Failing to read it must not stop the identity from being backed up.
-  const pins = pinsForBackup(await readAllPins(record.userId).catch(() => []));
+  // Failing to read it must not stop the identity from being backed up. What does not fit is counted by backupPinsOmitted and told to the user.
+  const { pins } = pinsForBackup(await readAllPins(record.userId).catch(() => []), pinBudget(target));
   if (pins) payload.pins = pins;
   return payload;
 };
 
-/** Same as getBackup but straight from this browser's storage (works before initializeEncryption ran). */
+/** Same as getBackup but straight from this browser's storage (works before initializeEncryption ran). Used by the server backup. */
 export const exportLocalIdentity = async (userId: string): Promise<BackupPayload | null> => {
   const stored = await dbGet(userId);
   return stored ? payloadOf(stored) : null;
