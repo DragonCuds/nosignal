@@ -202,6 +202,15 @@ export const acceptKeyChange = async (chatId: string, change: KeyChange): Promis
       if (envelope && envelope.senderId === change.memberId && envelope.senderPublicKey && await fingerprint(envelope.senderPublicKey) === current.newFingerprint) floor = Math.max(floor, state.keyVersion);
     }
     await raiseFloor(chatId, { floor });
+  } else {
+    // Group (S9a): same idea. A member's identity changed, so the version this browser has been sending with (made while that
+    // member still had the old identity) must not be used any more; only a later one. A server that hides the pending rotation and
+    // hands out the old version again is refused (sendGroupKey). The floor is the version after the last one USED here, and at
+    // least the one the server is waiting for. A version this browser has merely seen is not counted: an admin may already have
+    // made the next version after the change, and that one has to stay usable (it is the normal path).
+    const groupId = groupOfChat.get(chatId)!;
+    const pending = (await groupsApi.get(groupId).catch(() => undefined))?.pendingKeyVersion ?? 0;
+    await raiseFloor(chatId, { floor: Math.max((await readFloor(chatId)).used + 1, pending) });
   }
   keyCache.clear();
   dmCache.clear();

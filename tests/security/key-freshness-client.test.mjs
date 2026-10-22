@@ -430,3 +430,29 @@ test('S9a-6: a chat with more than 32 key versions: a message of version 1 still
   const page = await reload('hel', 'hel');
   assert.deepEqual(await readAll(page, 'hel', chat), ['از گاس']);
 });
+
+// ---- a member of a group starts fresh and the user accepts the new key: the floor moves on (S9a, groups) -----------------------------------------
+test('S9a-2f: group: after accepting a member\'s new key, a server that hides the pending rotation and hands out the old version is refused; the new version works', async () => {
+  const g = await makeGroup('gia', ['ivy', 'jon']);
+  await makeAdmin('gia', g.id, 'ivy');
+  const gia = await groupBrowser('gia', 'gia', g); const ivy = await groupBrowser('ivy', 'ivy', g);
+  assert.deepEqual(await keyed(gia, g), { keyed: true, rotated: true });
+  await as(ivy, (m) => m.rotateGroupKey(g.chatId, g.id));                    // ivy makes version 2 for everyone: she pins jon's key doing so
+  assert.equal((await encrypt(ivy, 'ivy', g.chatId)).keyVersion, 2);         // ivy has version 2 loaded and used
+  await startFresh('jon2', 'jon', 'jon-new');                                // jon starts fresh: the server asks for version 3
+  assert.equal((await inject('gia', 'GET', `/api/groups/${g.id}`)).json().pendingKeyVersion, 3);
+  const old = (await inject('ivy', 'GET', `/api/groups/${g.id}/keys?version=2`)).json();
+  const changes = await as(ivy, (m) => m.checkKeyChanges(g.chatId));
+  assert.equal(changes.length, 1);
+  await as(ivy, (m) => m.acceptKeyChange(g.chatId, changes[0]));
+  const lying = await groupBrowser('ivy', 'ivy', g);
+  groupLie('ivy', g, { detail: { keyVersion: 2, pendingKeyVersion: null }, keys: old });
+  await assert.rejects(encrypt(lying, 'ivy', g.chatId), (e) => e.name === 'ChatKeyRollbackError');
+  tamper.delete('ivy');
+  assert.deepEqual(profileOf('ivy').stores.keyFloors.get(`${ids.ivy}:${g.chatId}`), { floor: 3, used: 2 });
+  // the normal way: an admin makes version 3 for everyone's current keys, and sending opens again
+  const owner = await groupBrowser('gia', 'gia', g);
+  for (const change of await as(owner, (m) => m.checkKeyChanges(g.chatId))) await as(owner, (m) => m.acceptKeyChange(g.chatId, change));
+  assert.deepEqual(await keyed(owner, g), { keyed: true, rotated: true });
+  assert.equal((await encrypt(await groupBrowser('ivy', 'ivy', g), 'ivy', g.chatId)).keyVersion, 3);
+});
