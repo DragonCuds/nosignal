@@ -2,7 +2,7 @@ import { generateBackupablePair, toExtractable, type BackupPayload, type ServerB
 import { api, ApiError, type ChatCryptoState, type ChatMessageSummary, type Message, type OutboundEncryptedPayload } from './api.js';
 import { groupsApi, type GroupDetail, type GroupKeyEntry } from './groups/groupsApi.js';
 import { isStaleKeyError } from './keyErrors.js';
-import { b64ToBytes, bytesToB64, fingerprintOf, openEnvelopes, senderKeyFor, unwrapChatKey, wrapChatKey } from './dmKeys.js';
+import { b64ToBytes, bytesToB64, fingerprintOf, openEnvelopes, senderKeyFor, unwrapChatKey, wrapChatKey, type OpenedKey } from './dmKeys.js';
 import { acceptPin, currentPin, isLegacyPin, normalizePins, type PinList } from './pins.js';
 
 type Content = Pick<ChatMessageSummary, 'kind' | 'text' | 'payload'>;
@@ -25,10 +25,11 @@ const messageAadV2 = (chatId: string, senderId: string, cipherId: string, kind: 
   encoder.encode(`tel:message:v2:${chatId}:${senderId}:${cipherId}:${kind}`);
 
 const openDb = (): Promise<IDBDatabase> => new Promise((resolve, reject) => {
-  const request = indexedDB.open('tel-e2ee', 2);
+  const request = indexedDB.open('tel-e2ee', 3);
   request.onupgradeneeded = () => {
     if (!request.result.objectStoreNames.contains('identities')) request.result.createObjectStore('identities', { keyPath: 'userId' });
     if (!request.result.objectStoreNames.contains('pins')) request.result.createObjectStore('pins');
+    if (!request.result.objectStoreNames.contains('keyFloors')) request.result.createObjectStore('keyFloors'); // S9a: key version floors
   };
   request.onsuccess = () => resolve(request.result);
   request.onerror = () => reject(request.error);
@@ -108,6 +109,58 @@ const pinMember = async (memberId: string, value: string): Promise<void> => {
 };
 const fingerprint = fingerprintOf;
 
+// ---- Key version floor (S9a) ----
+// Per (own user, chat) this browser remembers the lowest key version it may still SEND with. A malicious server could otherwise
+// report an older key version as the current one (for a direct chat: our own old envelope, which always opens), and a message
+// would be sealed with a key that a stolen old identity can read. `used` is the highest version this browser sent with; `floor`
+// follows it, and is raised further when the user accepts a contact's new identity (the next version must be a fresh one).
+// Reading older messages never looks at the floor.
+type KeyFloor = { floor: number; used: number };
+const floorKey = (chatId: string): string => `${identity!.userId}:${chatId}`;
+const wholeNumber = (value: unknown): number => (typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : 0);
+const readFloor = async (chatId: string): Promise<KeyFloor> => {
+  if (!identity) throw new Error('Encryption identity is not initialized');
+  const db = await openDb();
+  try {
+    const stored = await new Promise<unknown>((resolve, reject) => {
+      const request = db.transaction('keyFloors').objectStore('keyFloors').get(floorKey(chatId));
+      request.onsuccess = () => resolve(request.result as unknown);
+      request.onerror = () => reject(request.error);
+    });
+    const record = (stored ?? {}) as Partial<KeyFloor>;
+    return { floor: wholeNumber(record.floor), used: wholeNumber(record.used) };
+  } finally { db.close(); }
+};
+/** Raises (never lowers) the floor and/or the highest used version in one transaction. */
+const raiseFloor = async (chatId: string, change: { floor?: number; used?: number }): Promise<void> => {
+  if (!identity) throw new Error('Encryption identity is not initialized');
+  const key = floorKey(chatId);
+  const db = await openDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction('keyFloors', 'readwrite');
+      const store = transaction.objectStore('keyFloors');
+      const request = store.get(key);
+      request.onsuccess = () => {
+        const old = (request.result ?? {}) as Partial<KeyFloor>;
+        const next: KeyFloor = {
+          floor: Math.max(wholeNumber(old.floor), change.floor ?? 0, change.used ?? 0),
+          used: Math.max(wholeNumber(old.used), change.used ?? 0)
+        };
+        if (next.floor !== wholeNumber(old.floor) || next.used !== wholeNumber(old.used)) store.put(next, key);
+      };
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+  } finally { db.close(); }
+};
+
+/** The chat is at a key version below the one this browser already moved past: sending is refused, reading older messages still works. */
+export class ChatKeyRollbackError extends Error {
+  constructor() { super('Encryption key is unavailable: the chat key went back to an older version. کلید گفت‌وگو به نسخهٔ قدیمی‌تری برگشته است؛ برای امنیت ارسال انجام نشد.'); this.name = 'ChatKeyRollbackError'; }
+}
+
 export type KeyChange = { memberId: string; oldFingerprint: string; newFingerprint: string };
 
 /** Contacts of this chat whose server-side key no longer matches the pinned one. Never changes any pin. */
@@ -133,8 +186,26 @@ export const acceptKeyChange = async (chatId: string, change: KeyChange): Promis
   if (!current || current.newFingerprint !== change.newFingerprint) throw new Error('The key changed again; review it first');
   // The new key becomes the current pin; the previous ones stay in the history so keys this contact wrapped earlier still open.
   await writePins(change.memberId, acceptPin(await readPins(change.memberId), current.newFingerprint));
+  if (!groupOfChat.has(chatId)) {
+    // Private chat (S9a): the contact's identity just changed, so a version made for the OLD identity must not be used to send
+    // any more (the contact may have lost that key, or had it stolen). The lowest acceptable version becomes:
+    //  - the one the server is still waiting for (`pending`) and never lower than the version after the last one this browser
+    //    sent with; or, when nothing is pending,
+    //  - the current version if the contact wrapped it with the key just accepted (it was made after the change), else the
+    //    version after the last one this browser used.
+    // A server that later goes back to a lower version, even one this browser never saw, is refused (dmSendKeys).
+    const state = await api.chatCrypto(chatId);
+    let floor = (await readFloor(chatId)).used + 1;
+    if (state.pendingKeyVersion != null) floor = Math.max(floor, state.pendingKeyVersion);
+    else {
+      const envelope = state.envelopes.find((item) => item.version === state.keyVersion);
+      if (envelope && envelope.senderId === change.memberId && envelope.senderPublicKey && await fingerprint(envelope.senderPublicKey) === current.newFingerprint) floor = Math.max(floor, state.keyVersion);
+    }
+    await raiseFloor(chatId, { floor });
+  }
   keyCache.clear();
   dmCache.clear();
+  dmReadCache.clear();
   groupCtxs.clear();
 };
 
@@ -150,6 +221,7 @@ export type InitResult = { fingerprint: string; created: boolean; backupSaved: b
 export const initializeIdentity = async (userId: string, wrap?: (payload: BackupPayload) => Promise<ServerBackupBlob>, beforeWrite?: () => void, signal?: AbortSignal): Promise<InitResult> => {
   groupCtxs.clear();
   dmCache.clear();
+  dmReadCache.clear();
   const stored = await dbGet(userId);
   beforeWrite?.();
   let created = false;
@@ -223,6 +295,7 @@ export const resetIdentity = async (userId: string, password: string, secondFact
   sessionPrivateJwk = pair.privateJwk;
   keyCache.clear();
   dmCache.clear();
+  dmReadCache.clear();
   groupCtxs.clear();
   await api.registerCryptoIdentity(userId, next.publicKey);
 };
@@ -242,6 +315,7 @@ export const importIdentity = async (payload: BackupPayload, beforeWrite?: () =>
   sessionPrivateJwk = payload.privateKey;
   keyCache.clear();
   dmCache.clear();
+  dmReadCache.clear();
   groupCtxs.clear();
   await api.registerCryptoIdentity(next.userId, next.publicKey, undefined, signal);
 };
@@ -257,8 +331,11 @@ const wrapKey = async (scope: string, recipientId: string, creatorId: string, pu
 // Version v has one envelope per member. After someone starts fresh the server asks for version v+1; whoever opens the chat
 // first creates it, wrapped for the members' CURRENT identities. Old versions stay readable for the contact: their envelopes
 // carry the sender's public key from back then, accepted only if this browser pinned that fingerprint earlier (dmKeys.ts).
-type DmKeys = { version: number; key: CryptoKey; keys: Map<number, CryptoKey>; loadedAt: number };
+// `key` is the key for NEW messages; absent when the server reports a version below this browser's floor (S9a): the older keys
+// in `keys` still open older messages.
+type DmKeys = { version: number; key: CryptoKey | undefined; keys: Map<number, CryptoKey>; loadedAt: number };
 const dmCache = new Map<string, Promise<DmKeys>>();
+// (dmReadCache, below, is cleared next to it)
 
 /** The key a message was built with is no longer the current one. */
 export class StaleChatKeyError extends Error {
@@ -267,9 +344,11 @@ export class StaleChatKeyError extends Error {
 
 const verifyMembers = async (state: ChatCryptoState): Promise<void> => {
   for (const member of state.members) {
-    if (!member.publicKey || !member.fingerprint) continue;
+    if (!member.publicKey) continue; // establishKey refuses a chat where a member has no key
+    // The fingerprint is always computed here from the key itself. The server's copy may only be checked against it: a missing
+    // one is no reason to skip the member (that would let a key without a pin pass), a different one is an error.
     const actual = await fingerprint(member.publicKey);
-    if (actual !== member.fingerprint) throw new Error('Invalid encryption identity fingerprint');
+    if (member.fingerprint && actual !== member.fingerprint) throw new Error('Invalid encryption identity fingerprint');
     // Our own key is known locally, not trusted on first use: a pin left over from before "start fresh" must not block us.
     if (member.userId === identity?.userId) {
       if (actual !== identity.fingerprint) throw new Error('کلید رمزنگاری حساب شما با کلید سرور یکسان نیست.');
@@ -287,6 +366,12 @@ const establishKey = async (chatId: string, state: ChatCryptoState): Promise<Cha
   if (!identity) throw new Error('Encryption identity is not initialized');
   if (state.members.some((member) => !member.publicKey)) throw new Error('طرف مقابل هنوز رمزنگاری را راه‌اندازی نکرده است.');
   const version = state.pendingKeyVersion ?? Math.max(1, state.keyVersion);
+  if (version < (await readFloor(chatId)).floor) throw new ChatKeyRollbackError();
+  // Before any envelope is made: every other member's key, as fingerprinted HERE, must be the one pinned (a first contact is
+  // pinned now). A key that does not match is reported (KeyChangedError), never wrapped for.
+  for (const member of state.members) {
+    if (member.userId !== identity.userId) await pinMember(member.userId, await fingerprint(member.publicKey!));
+  }
   const raw = crypto.getRandomValues(new Uint8Array(32));
   const envelopes = await Promise.all(state.members.map(async (member) => {
     const recipientFingerprint = await fingerprint(member.publicKey!);
@@ -303,18 +388,14 @@ const establishKey = async (chatId: string, state: ChatCryptoState): Promise<Cha
   return api.chatCrypto(chatId);
 };
 
-const loadDmKeys = async (chatId: string): Promise<DmKeys> => {
+const importChatKey = (raw: ArrayBuffer): Promise<CryptoKey> => crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+
+/** Opens every envelope of `state` that passes the pin rules (dmKeys.ts). Needs no current key version and creates nothing. */
+const openDmEnvelopes = async (chatId: string, state: ChatCryptoState): Promise<Map<number, OpenedKey>> => {
   if (!identity) throw new Error('Encryption identity is not initialized');
-  let state = await api.chatCrypto(chatId);
-  await verifyMembers(state);
-  for (let attempt = 0; !dmKeyReady(state) && attempt < 3; attempt += 1) {
-    state = await establishKey(chatId, state);
-    await verifyMembers(state);
-  }
-  if (!dmKeyReady(state)) throw new Error('Encryption key is unavailable');
   const pins = new Map<string, PinList>();
   for (const member of state.members) pins.set(member.userId, await readPins(member.userId));
-  const opened = await openEnvelopes({
+  return openEnvelopes({
     chatId, recipientId: identity.userId, recipientPrivateKey: identity.privateKey, envelopes: state.envelopes,
     context: {
       selfId: identity.userId, selfFingerprint: identity.fingerprint, selfPublicKey: identity.publicKey,
@@ -322,15 +403,56 @@ const loadDmKeys = async (chatId: string): Promise<DmKeys> => {
       memberKey: (userId) => state.members.find((member) => member.userId === userId)?.publicKey ?? null
     }
   });
+};
+
+// ---- Reading (S9a): opening older messages never depends on the key for NEW messages. ----
+// A separate cache from dmCache: it only fetches and opens envelopes. It never creates a key version, and it does not care which
+// version is current or pending (a contact who started fresh and has not registered a new identity yet, a server that is
+// missing the next version). A version outside the newest-32 list is fetched on its own (`?version=N`).
+type DmReadKeys = { keys: Map<number, CryptoKey>; misses: Map<number, number>; inflight: Map<string, Promise<void>>; listed: boolean };
+const dmReadCache = new Map<string, DmReadKeys>();
+const readEntry = (chatId: string): DmReadKeys => {
+  let entry = dmReadCache.get(chatId);
+  if (!entry) { entry = { keys: new Map(), misses: new Map(), inflight: new Map(), listed: false }; dmReadCache.set(chatId, entry); }
+  return entry;
+};
+const loadDmReadKeys = async (chatId: string, version: number | undefined): Promise<void> => {
+  const state = await api.chatCrypto(chatId, version);
+  await verifyMembers(state); // the key-change flow still applies: a changed contact key is reported, not trusted
+  const entry = readEntry(chatId);
+  for (const [opened, found] of await openDmEnvelopes(chatId, state)) entry.keys.set(opened, await importChatKey(found.raw));
+  if (version === undefined) entry.listed = true;
+};
+const dedupe = (entry: DmReadKeys, name: string, run: () => Promise<void>): Promise<void> => {
+  const running = entry.inflight.get(name);
+  if (running) return running;
+  const started = run().finally(() => entry.inflight.delete(name));
+  entry.inflight.set(name, started);
+  return started;
+};
+
+const loadDmKeys = async (chatId: string): Promise<DmKeys> => {
+  if (!identity) throw new Error('Encryption identity is not initialized');
+  const { floor } = await readFloor(chatId);
+  let state = await api.chatCrypto(chatId);
+  await verifyMembers(state);
+  for (let attempt = 0; !dmKeyReady(state) && attempt < 3; attempt += 1) {
+    state = await establishKey(chatId, state);
+    await verifyMembers(state);
+  }
+  if (!dmKeyReady(state)) throw new Error('Encryption key is unavailable');
   const keys = new Map<number, CryptoKey>();
   let currentKey: CryptoKey | undefined;
-  for (const [version, entry] of opened) {
-    const key = await crypto.subtle.importKey('raw', entry.raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+  for (const [version, entry] of await openDmEnvelopes(chatId, state)) {
+    const key = await importChatKey(entry.raw);
     keys.set(version, key);
     // New messages only ever use the current version, and only if its envelope is from a key that is trusted today.
-    if (version === state.keyVersion && entry.current) currentKey = key;
+    if (version === state.keyVersion && entry.current && version >= floor) currentKey = key;
   }
-  if (!currentKey) throw new Error('Encryption key is unavailable');
+  // A version below the floor: older messages stay readable, but there is no key for new ones (see dmSendKeys).
+  if (!currentKey && state.keyVersion >= floor) throw new Error('Encryption key is unavailable');
+  const reading = readEntry(chatId);
+  for (const [version, key] of keys) reading.keys.set(version, key);
   return { version: state.keyVersion, key: currentKey, keys, loadedAt: Date.now() };
 };
 
@@ -343,21 +465,39 @@ const dmKeysFor = (chatId: string): Promise<DmKeys> => {
   return pending;
 };
 
-/** The key of one version. A version this tab does not hold yet (the contact created a new one) triggers one re-fetch per MISS_RETRY_MS. */
+/**
+ * The key for NEW messages of a direct chat. Refuses (ChatKeyRollbackError) when the chat is at a version below this browser's
+ * floor, and records the version it hands out as used. Re-reads the chat once before refusing, so a server that has healed
+ * (or a floor raised by another tab) is noticed.
+ */
+const dmSendKeys = async (chatId: string): Promise<{ key: CryptoKey; version: number }> => {
+  const floor = async () => (await readFloor(chatId)).floor;
+  let keys = await dmKeysFor(chatId);
+  if (!keys.key || keys.version < await floor()) { dmCache.delete(chatId); keys = await dmKeysFor(chatId); }
+  if (!keys.key || keys.version < await floor()) throw new ChatKeyRollbackError();
+  await raiseFloor(chatId, { used: keys.version });
+  return { key: keys.key, version: keys.version };
+};
+
+/**
+ * The key that opens messages of one version (reading only). The newest versions come in one request; a version that is not among
+ * them is requested alone, at most once per MISS_RETRY_MS.
+ */
 const dmKeyForVersion = async (chatId: string, version: number): Promise<CryptoKey> => {
-  const seen = dmKeysFor(chatId);
-  let keys = await seen;
-  if (!keys.keys.has(version) && Date.now() - keys.loadedAt >= MISS_RETRY_MS) {
-    if (dmCache.get(chatId) === seen) dmCache.delete(chatId); // several messages missing the same version share one re-fetch
-    keys = await dmKeysFor(chatId);
+  const entry = readEntry(chatId);
+  const have = () => entry.keys.get(version);
+  if (!have() && !entry.listed) await dedupe(entry, 'list', () => loadDmReadKeys(chatId, undefined)).catch((error: unknown) => { if (!entry.keys.size) throw error; });
+  if (!have() && Date.now() - (entry.misses.get(version) ?? 0) >= MISS_RETRY_MS) {
+    await dedupe(entry, `v${version}`, () => loadDmReadKeys(chatId, version)).catch((error: unknown) => { entry.misses.set(version, Date.now()); throw error; });
+    if (!have()) entry.misses.set(version, Date.now());
   }
-  const key = keys.keys.get(version);
+  const key = have();
   if (!key) throw new Error('No key for this chat key version');
   return key;
 };
 
 /** Forget the cached keys of a chat (a send was refused as stale, or the contact's key changed). */
-export const invalidateChatKeys = (chatId: string): void => { dmCache.delete(chatId); keyCache.delete(chatId); };
+export const invalidateChatKeys = (chatId: string): void => { dmCache.delete(chatId); dmReadCache.delete(chatId); keyCache.delete(chatId); };
 
 /** Check every recipient before creating any envelope. Pin first contacts only after all existing pins match. */
 const verifyRecipients = async (members: Array<{ userId: string; publicKey: JsonWebKey | null }>): Promise<Array<{ userId: string; publicKey: JsonWebKey; fingerprint: string }>> => {
@@ -389,6 +529,8 @@ type GroupCtx = {
   groupId: string; chatId: string;
   keys: Map<number, CryptoKey>; raws: Map<number, Uint8Array>; latest: number; checkedAt: number;
   members: Map<string, JsonWebKey | null>; detail?: GroupDetail; misses: Map<number, number>;
+  /** Versions whose envelope is from a wrapper who is a member NOW and whose key is trusted today: only these may become `latest`. */
+  sendable: Set<number>;
 };
 const groupCtxs = new Map<string, GroupCtx>();
 const KEY_RECHECK_MS = 3_000;
@@ -406,7 +548,7 @@ const groupCtx = (chatId: string, groupId?: string): GroupCtx => {
   const id = groupId ?? groupOfChat.get(chatId);
   if (!id) throw new Error('Not a group chat');
   let ctx = groupCtxs.get(id);
-  if (!ctx) { ctx = { groupId: id, chatId, keys: new Map(), raws: new Map(), latest: 0, checkedAt: 0, members: new Map(), misses: new Map() }; groupCtxs.set(id, ctx); }
+  if (!ctx) { ctx = { groupId: id, chatId, keys: new Map(), raws: new Map(), latest: 0, checkedAt: 0, members: new Map(), misses: new Map(), sendable: new Set() }; groupCtxs.set(id, ctx); }
   return ctx;
 };
 const loadGroupDetail = async (ctx: GroupCtx): Promise<GroupDetail> => {
@@ -425,8 +567,10 @@ const loadGroupDetail = async (ctx: GroupCtx): Promise<GroupDetail> => {
  */
 const absorbGroupKeys = async (ctx: GroupCtx, entries: GroupKeyEntry[]): Promise<void> => {
   if (!identity) return;
+  // Who is a member now decides which envelope may become the key for new messages (a wrapper who left cannot).
+  if (!ctx.detail) await loadGroupDetail(ctx).catch(() => undefined);
   for (const entry of entries) {
-    if (ctx.keys.has(entry.version) || entry.wrapped.length < 20) continue;
+    if ((ctx.keys.has(entry.version) && ctx.sendable.has(entry.version)) || entry.wrapped.length < 20) continue;
     try {
       const own = entry.wrappedBy === identity.userId;
       // Our own envelopes are checked against our local identity, never against a pin (a pin of ourselves left over from before
@@ -454,7 +598,7 @@ const absorbGroupKeys = async (ctx: GroupCtx, entries: GroupKeyEntry[]): Promise
       }));
       ctx.raws.set(entry.version, raw);
       ctx.keys.set(entry.version, await crypto.subtle.importKey('raw', buffer(raw), 'AES-GCM', false, ['encrypt', 'decrypt']));
-      if (sender.current) ctx.latest = Math.max(ctx.latest, entry.version);
+      if (sender.current && ctx.members.has(entry.wrappedBy)) { ctx.sendable.add(entry.version); ctx.latest = Math.max(ctx.latest, entry.version); }
     } catch { /* this envelope is unusable (changed identity or corrupt); skip it */ }
   }
 };
@@ -467,6 +611,23 @@ const currentGroupKey = async (chatId: string): Promise<{ key: CryptoKey; versio
   if (!ctx.keys.size || Date.now() - ctx.checkedAt > KEY_RECHECK_MS) await fetchGroupKeys(ctx, 'latest').catch((error) => { if (!ctx.keys.size) throw error; });
   const key = ctx.keys.get(ctx.latest);
   if (!key) throw new Error('کلید گروه هنوز آماده نیست؛ کمی بعد دوباره تلاش کنید.');
+  return { key, version: ctx.latest };
+};
+/**
+ * The key for NEW group messages (S9a). Besides the key itself, the group's current state is checked: no rotation may be pending,
+ * the key must be at least the group's current version, and not below this browser's floor. Whatever the server returned as
+ * "latest" is not enough: an old envelope, or one by someone who already left, would otherwise be taken for the current key.
+ */
+const sendGroupKey = async (chatId: string): Promise<{ key: CryptoKey; version: number }> => {
+  const ctx = groupCtx(chatId);
+  if (!ctx.keys.size || !ctx.detail || Date.now() - ctx.checkedAt > KEY_RECHECK_MS) {
+    try { await loadGroupDetail(ctx); await fetchGroupKeys(ctx, 'latest'); } catch (error) { if (!ctx.keys.size || !ctx.detail) throw error; }
+  }
+  const detail = ctx.detail;
+  const key = ctx.sendable.has(ctx.latest) ? ctx.keys.get(ctx.latest) : undefined;
+  if (!detail || !key || detail.pendingKeyVersion != null || ctx.latest < detail.keyVersion) throw new Error('کلید گروه هنوز آماده نیست؛ کمی بعد دوباره تلاش کنید.');
+  if (ctx.latest < (await readFloor(chatId)).floor) throw new ChatKeyRollbackError();
+  await raiseFloor(chatId, { used: ctx.latest });
   return { key, version: ctx.latest };
 };
 const groupKeyCandidates = async (chatId: string, version: number | undefined): Promise<CryptoKey[]> => {
@@ -496,6 +657,8 @@ const uploadGroupKey = async (ctx: GroupCtx, detail: GroupDetail, version: numbe
   ctx.raws.set(version, raw);
   ctx.keys.set(version, await crypto.subtle.importKey('raw', buffer(raw), 'AES-GCM', false, ['encrypt', 'decrypt']));
   ctx.latest = Math.max(ctx.latest, version);
+  ctx.sendable.add(version);
+  ctx.detail = { ...detail, keyVersion: Math.max(detail.keyVersion, version), pendingKeyVersion: null }; // the server accepted this version
   ctx.checkedAt = Date.now();
 };
 
@@ -542,7 +705,7 @@ const chatKey = (chatId: string): Promise<CryptoKey> => {
     channelPending.catch(() => keyCache.delete(chatId));
     return channelPending;
   }
-  return dmKeysFor(chatId).then((keys) => keys.key);
+  return dmSendKeys(chatId).then((keys) => keys.key);
 };
 
 /**
@@ -560,24 +723,20 @@ export const chatEncryptionKey = async (chatId: string, version?: number): Promi
 
 /** The key new content must be sealed with, and its version (channels have none). Use the SAME version for everything in one message. */
 export const currentChatKey = async (chatId: string): Promise<{ key: CryptoKey; version?: number }> => {
-  if (groupOfChat.has(chatId)) return currentGroupKey(chatId);
+  if (groupOfChat.has(chatId)) return sendGroupKey(chatId);
   if (channelOfChat.has(chatId)) return { key: await chatKey(chatId) };
-  const keys = await dmKeysFor(chatId);
-  return { key: keys.key, version: keys.version };
+  return dmSendKeys(chatId);
 };
 
 /** `expectVersion`: the version media of this message was already sealed with; a different current version is a StaleChatKeyError. */
 export const encryptContent = async (chatId: string, senderId: string, content: Content, expectVersion?: number): Promise<OutboundEncryptedPayload> => {
   let key: CryptoKey;
   let keyVersion: number | undefined;
-  if (groupOfChat.has(chatId)) ({ key, version: keyVersion } = await currentGroupKey(chatId));
+  if (groupOfChat.has(chatId)) ({ key, version: keyVersion } = await sendGroupKey(chatId));
   else if (channelOfChat.has(chatId)) key = await chatKey(chatId);
-  else {
-    const keys = await dmKeysFor(chatId);
-    if (expectVersion !== undefined && expectVersion !== keys.version) throw new StaleChatKeyError();
-    key = keys.key;
-    keyVersion = keys.version;
-  }
+  else ({ key, version: keyVersion } = await dmSendKeys(chatId));
+  // Media was sealed with one key version; if the chat moved on in between (direct or group), nothing mismatched is sent.
+  if (!channelOfChat.has(chatId) && expectVersion !== undefined && expectVersion !== keyVersion) throw new StaleChatKeyError();
   const cipherId = crypto.randomUUID();
   const nonce = crypto.getRandomValues(new Uint8Array(12));
   const plaintext = encoder.encode(JSON.stringify(content));

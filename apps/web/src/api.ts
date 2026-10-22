@@ -230,7 +230,8 @@ export const api = {
   resetCryptoIdentity: (expectedRevision: number, actionToken: string) => request<void>('/api/crypto/identity/reset', { method: 'POST', body: JSON.stringify({ expectedRevision, actionToken }) }),
   checkPassword: (password: string) => request<void>('/api/crypto/password-check', { method: 'POST', body: JSON.stringify({ password }) }),
   channelKey: (channelId: string) => request<{ version: number; key: string }>(`/api/channels/${encodeURIComponent(channelId)}/key`),
-  chatCrypto: (chatId: string) => request<ChatCryptoState>(`/api/chats/${encodeURIComponent(chatId)}/crypto`),
+  /** With `version`: only the caller's envelope of that one key version (reaches versions older than the newest-32 cap). */
+  chatCrypto: (chatId: string, version?: number) => request<ChatCryptoState>(`/api/chats/${encodeURIComponent(chatId)}/crypto${version === undefined ? '' : `?version=${version}`}`),
   createCryptoEnvelopes: (chatId: string, body: { version: number; senderFingerprint: string; envelopes: Array<{ recipientId: string; recipientFingerprint: string; nonce: string; ciphertext: string }> }) =>
     request<{ keyVersion: number }>(`/api/chats/${encodeURIComponent(chatId)}/crypto/envelopes`, { method: 'POST', body: JSON.stringify(body) }),
   /** How many chats (direct + Saved Messages) a "start fresh" touches. */
