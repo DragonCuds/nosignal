@@ -6,7 +6,8 @@ export type GroupDetail = {
   id: string; chatId: string; title: string; avatarPath: string | null; role: GroupRole;
   memberCount: number; keyVersion: number; pendingKeyVersion: number | null; members: GroupMember[];
 };
-export type GroupKeyEntry = { version: number; wrapped: string; wrappedBy: string };
+/** `wrapper*` is the wrapper's public key as it was when the envelope was wrapped (null for rows from before NS-07b). Untrusted: see e2ee.ts. */
+export type GroupKeyEntry = { version: number; wrapped: string; wrappedBy: string; wrapperFingerprint?: string | null; wrapperPublicKey?: JsonWebKey | null };
 
 // Own fetch wrapper (same idea as channelsApi): errors carry the server message.
 const call = async <T>(path: string, init?: RequestInit): Promise<T> => {

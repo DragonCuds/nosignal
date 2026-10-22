@@ -26,6 +26,10 @@ const parseWrapped = (value: unknown): string | null =>
 const parseVersion = (value: unknown): number | null =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= 1_000_000 ? value : null;
 const fingerprint = (jwk: JsonWebKey): string => createHash('sha256').update(`P-256:${jwk.x}:${jwk.y}`).digest('hex');
+const parseJwk = (value: string | null): JsonWebKey | null => {
+  if (!value) return null;
+  try { const parsed: unknown = JSON.parse(value); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as JsonWebKey : null; } catch { return null; }
+};
 
 type GroupRow = {
   id: string; chat_id: string; title: string; avatar_path: string | null; created_by: string;
@@ -285,13 +289,19 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
       else if (typeof raw === 'string' && /^[1-9]\d{0,6}$/.test(raw)) version = Number(raw);
       else return reply.code(400).send({ error: 'version must be a number or latest' });
     }
-    const rows = await db.query<{ version: number; wrapped: string; wrapped_by: string }>(
-      `SELECT version, wrapped, CAST(wrapped_by AS TEXT) AS wrapped_by FROM group_key_envelopes WHERE group_id = $1 AND user_id = $2
+    // Each envelope carries the wrapper's public key as it was when wrapped (NS-07b). The browser opens an old version with it
+    // only if that fingerprint was pinned before for the wrapper; the server is not trusted for this.
+    const rows = await db.query<{ version: number; wrapped: string; wrapped_by: string; wrapper_fingerprint: string | null; wrapper_public_jwk: string | null }>(
+      `SELECT version, wrapped, CAST(wrapped_by AS TEXT) AS wrapped_by, wrapper_fingerprint, wrapper_public_jwk FROM group_key_envelopes
+       WHERE group_id = $1 AND user_id = $2
        AND ($3 IS NULL OR version = $3) ORDER BY version ${version === 'latest' ? 'DESC LIMIT 1' : 'ASC'}`,
       [group.id, request.user!.id, typeof version === 'number' ? version : null]
     );
     reply.header('Cache-Control', 'no-store');
-    return rows.rows.map((r) => ({ version: r.version, wrapped: r.wrapped, wrappedBy: r.wrapped_by }));
+    return rows.rows.map((r) => ({
+      version: r.version, wrapped: r.wrapped, wrappedBy: r.wrapped_by,
+      wrapperFingerprint: r.wrapper_fingerprint, wrapperPublicKey: parseJwk(r.wrapper_public_jwk)
+    }));
   });
 
   app.put<{ Params: { id: string }; Body: { version?: unknown; expectedMembers?: unknown; envelopes?: unknown } }>('/api/groups/:id/keys', { preHandler: app.requireUser, config: { rateLimit: WRITE } }, async (request, reply) => {
@@ -329,8 +339,16 @@ export const registerGroupRoutes = async (app: FastifyInstance): Promise<void> =
         await client.query('ROLLBACK');
         return reply.code(400).send({ error: 'envelopes must contain one wrapped key for every current member' });
       }
+      // The wrapper's key comes from the server's own record of the uploader's CURRENT identity (checked against
+      // expectedMembers above), never from the request body.
+      const wrapperKey = currentMembers.find((member) => member.user_id === request.user!.id)!.public_jwk!;
+      const wrapperJwk = JSON.stringify({ kty: wrapperKey.kty, crv: wrapperKey.crv, x: wrapperKey.x, y: wrapperKey.y });
+      const wrapperFingerprint = fingerprint(wrapperKey);
       for (const envelope of envelopes) {
-        await client.query('INSERT INTO group_key_envelopes (group_id, version, user_id, wrapped, wrapped_by) VALUES ($1, $2, $3, $4, $5)', [group.id, version, envelope.userId, envelope.wrapped, request.user!.id]);
+        await client.query(
+          `INSERT INTO group_key_envelopes (group_id, version, user_id, wrapped, wrapped_by, wrapper_fingerprint, wrapper_public_jwk)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [group.id, version, envelope.userId, envelope.wrapped, request.user!.id, wrapperFingerprint, wrapperJwk]);
       }
       await client.query('UPDATE groups SET key_version = $1, pending_version = NULL WHERE id = $2', [version, group.id]);
       await client.query('COMMIT');

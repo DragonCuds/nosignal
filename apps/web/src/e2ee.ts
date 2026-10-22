@@ -1,17 +1,12 @@
 import { generateBackupablePair, toExtractable, type BackupPayload, type ServerBackupBlob } from './backup/crypto.js';
 import { api, ApiError, type ChatCryptoState, type ChatMessageSummary, type Message, type OutboundEncryptedPayload } from './api.js';
-import { groupsApi, type GroupDetail } from './groups/groupsApi.js';
+import { groupsApi, type GroupDetail, type GroupKeyEntry } from './groups/groupsApi.js';
 import { isStaleKeyError } from './keyErrors.js';
-import { b64ToBytes, bytesToB64, fingerprintOf, openEnvelopes, unwrapChatKey, wrapChatKey } from './dmKeys.js';
+import { b64ToBytes, bytesToB64, fingerprintOf, openEnvelopes, senderKeyFor, unwrapChatKey, wrapChatKey } from './dmKeys.js';
 import { acceptPin, currentPin, isLegacyPin, normalizePins, type PinList } from './pins.js';
 
 type Content = Pick<ChatMessageSummary, 'kind' | 'text' | 'payload'>;
 type StoredIdentity = { userId: string; privateKey: CryptoKey; publicKey: JsonWebKey; fingerprint: string };
-/** What group envelope handling needs (a group envelope is one wrapped string, no version row). */
-type CryptoState = {
-  members: Array<{ userId: string; publicKey: JsonWebKey | null; fingerprint: string | null }>;
-  envelope: { senderId: string; version: 1; nonce: string; ciphertext: string } | null;
-};
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -258,14 +253,6 @@ const wrapKey = async (scope: string, recipientId: string, creatorId: string, pu
   return { recipientId, version: 1 as const, ...wrapped };
 };
 
-/** Group envelopes: opened with the wrapper's CURRENT server key (group history pins are S7b, not handled here). */
-const unwrapRaw = async (chatId: string, state: CryptoState): Promise<ArrayBuffer> => {
-  if (!identity || !state.envelope) throw new Error('Encryption key is unavailable');
-  const sender = state.members.find((member) => member.userId === state.envelope!.senderId);
-  if (!sender?.publicKey) throw new Error('Encryption sender identity is unavailable');
-  return unwrapChatKey({ scope: chatId, recipientId: identity.userId, creatorId: state.envelope.senderId, recipientPrivateKey: identity.privateKey, creatorPublicKey: sender.publicKey, nonce: state.envelope.nonce, ciphertext: state.envelope.ciphertext });
-};
-
 // ---- Direct chats and Saved Messages: numbered key versions (NS-07). ----
 // Version v has one envelope per member. After someone starts fresh the server asks for version v+1; whoever opens the chat
 // first creates it, wrapped for the members' CURRENT identities. Old versions stay readable for the contact: their envelopes
@@ -380,11 +367,12 @@ const verifyRecipients = async (members: Array<{ userId: string; publicKey: Json
     if (!member.publicKey) throw new Error('یکی از اعضا هنوز رمزنگاری را راه‌اندازی نکرده است.');
     const actual = await fingerprint(member.publicKey);
     if (member.userId === identity.userId && actual !== identity.fingerprint) throw new Error('کلید رمزنگاری حساب شما با کلید سرور یکسان نیست.');
-    const pinned = await readPin(member.userId);
+    const own = member.userId === identity.userId; // our own key is known locally, never pinned (like verifyMembers)
+    const pinned = own ? undefined : await readPin(member.userId);
     if (pinned && pinned !== actual) throw new KeyChangedError(member.userId, pinned, actual);
     checked.push({ ...member, publicKey: member.publicKey, fingerprint: actual });
   }
-  for (const member of checked) await pinMember(member.userId, member.fingerprint);
+  for (const member of checked) if (member.userId !== identity.userId) await pinMember(member.userId, member.fingerprint);
   return checked;
 };
 
@@ -428,19 +416,45 @@ const loadGroupDetail = async (ctx: GroupCtx): Promise<GroupDetail> => {
   for (const member of detail.members) ctx.members.set(member.id, member.publicKey);
   return detail;
 };
-const absorbGroupKeys = async (ctx: GroupCtx, entries: Array<{ version: number; wrapped: string; wrappedBy: string }>): Promise<void> => {
+/**
+ * Opens group key envelopes (NS-07b). Which key may open an envelope is decided by senderKeyFor (dmKeys.ts), the same rule as for
+ * direct chats: the wrapper's key stored with the envelope must be a fingerprint this browser pinned for that wrapper before
+ * (a never-pinned key is rejected, no trust on first use for history). A key that is not the wrapper's CURRENT pin opens the
+ * old version for reading, but never becomes the key for new messages (`ctx.latest` only follows trusted-today envelopes).
+ * Group envelopes use the original additional data (no version in it), so unwrapChatKey gets no `version`.
+ */
+const absorbGroupKeys = async (ctx: GroupCtx, entries: GroupKeyEntry[]): Promise<void> => {
+  if (!identity) return;
   for (const entry of entries) {
     if (ctx.keys.has(entry.version) || entry.wrapped.length < 20) continue;
     try {
-      let publicKey = ctx.members.get(entry.wrappedBy);
-      if (publicKey === undefined) { await loadGroupDetail(ctx); publicKey = ctx.members.get(entry.wrappedBy); }
-      if (!publicKey) continue;
-      await pinMember(entry.wrappedBy, await fingerprint(publicKey)); // trust on first use, like direct chats
-      const state: CryptoState = { members: [{ userId: entry.wrappedBy, publicKey, fingerprint: null }], envelope: { senderId: entry.wrappedBy, version: 1, nonce: entry.wrapped.slice(0, 16), ciphertext: entry.wrapped.slice(16) } };
-      const raw = new Uint8Array(await unwrapRaw(groupScope(ctx.groupId, entry.version), state));
+      const own = entry.wrappedBy === identity.userId;
+      // Our own envelopes are checked against our local identity, never against a pin (a pin of ourselves left over from before
+      // "start fresh" must not block us).
+      if (!own) {
+        let publicKey = ctx.members.get(entry.wrappedBy);
+        if (publicKey === undefined) { await loadGroupDetail(ctx); publicKey = ctx.members.get(entry.wrappedBy); }
+        // A wrapper who is still a member: pin on first contact; a changed key is never pinned here (KeyChangedError: skip until the user decides).
+        if (publicKey) await pinMember(entry.wrappedBy, await fingerprint(publicKey));
+      }
+      const pins = own ? [] : await readPins(entry.wrappedBy);
+      const nonce = entry.wrapped.slice(0, 16);
+      const ciphertext = entry.wrapped.slice(16);
+      const sender = await senderKeyFor(
+        { senderId: entry.wrappedBy, version: entry.version, nonce, ciphertext, senderFingerprint: entry.wrapperFingerprint, senderPublicKey: entry.wrapperPublicKey },
+        {
+          selfId: identity.userId, selfFingerprint: identity.fingerprint, selfPublicKey: identity.publicKey,
+          pins: () => pins, memberKey: (userId) => ctx.members.get(userId) ?? null
+        }
+      );
+      if (!sender) continue;
+      const raw = new Uint8Array(await unwrapChatKey({
+        scope: groupScope(ctx.groupId, entry.version), recipientId: identity.userId, creatorId: entry.wrappedBy,
+        recipientPrivateKey: identity.privateKey, creatorPublicKey: sender.publicKey, nonce, ciphertext
+      }));
       ctx.raws.set(entry.version, raw);
       ctx.keys.set(entry.version, await crypto.subtle.importKey('raw', buffer(raw), 'AES-GCM', false, ['encrypt', 'decrypt']));
-      ctx.latest = Math.max(ctx.latest, entry.version);
+      if (sender.current) ctx.latest = Math.max(ctx.latest, entry.version);
     } catch { /* this envelope is unusable (changed identity or corrupt); skip it */ }
   }
 };

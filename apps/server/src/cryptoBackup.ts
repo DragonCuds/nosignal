@@ -211,7 +211,11 @@ export const registerCryptoBackupRoutes = async (app: FastifyInstance): Promise<
         'UPDATE direct_chat_keys SET pending_version = COALESCE(pending_version, key_version + 1) WHERE chat_id IN (SELECT chat_id FROM chat_members WHERE user_id = $1)', [userId]);
       await client.query('DELETE FROM chat_key_envelopes WHERE recipient_id = $1', [userId]);
       await client.query('DELETE FROM user_crypto_identities WHERE user_id = $1', [userId]);
-      // Groups: this member's envelopes are for the old identity. Ask an admin to rotate the key (new envelope for the new identity).
+      // Groups (NS-07b): this member's own envelopes were wrapped for the old identity and are useless to the new one: delete
+      // them (only those where the resetting user is the RECIPIENT). Envelopes this member wrapped for others stay, with the
+      // wrapper key stored in each row, so the other members keep the whole group history. Then ask an admin to rotate the key
+      // (new envelope for the new identity).
+      await client.query('DELETE FROM group_key_envelopes WHERE user_id = $1', [userId]);
       await client.query('UPDATE groups SET pending_version = COALESCE(pending_version, key_version + 1) WHERE key_version > 0 AND chat_id IN (SELECT chat_id FROM chat_members WHERE user_id = $1)', [userId]);
       // The old wrapped key no longer matches the account; the chosen mode (auto/manual) is kept.
       await client.query(`UPDATE user_crypto_backups SET salt = NULL, iterations = NULL, wrapped = NULL, version = NULL,
