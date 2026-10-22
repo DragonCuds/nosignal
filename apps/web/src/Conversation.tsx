@@ -469,19 +469,20 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
   /** Attachments keep the chunked sendAttachment flow; a final failure leaves a failed bubble (retry/delete) instead of vanishing. */
   const attachWith = (input: AttachmentInput, replyTo: string | null): Promise<void> => {
     let failedId: string | undefined;
+    let failedCopy: string | undefined;
     const deps: SenderDeps = {
       chatId: chat.id, userId: currentUser.id, replyToId: replyTo, draft, append, settle,
-      discard: (temporary) => {
+      discard: (temporary, caught) => {
         failedId = temporary.id;
-        void refreshKeyChanges(); // the send may have failed because a member's key changed (sendAttachment hides the error type): show the notice if so
+        if (caught instanceof KeyChangedError) { keyChangedWhileSending(); failedCopy = KEY_CHANGED_COPY; }
         const info = attachmentPayload(temporary.payload);
         if (info) localBlobs.set(info.attachment.id, input.blob); // so the failed bubble still shows the file
-        markFailed(temporary.id, 'ارسال فایل انجام نشد.', () => { dropDraft(temporary.id); void attachWith(input, replyTo); });
+        markFailed(temporary.id, failedCopy ?? 'ارسال فایل انجام نشد.', () => { dropDraft(temporary.id); void attachWith(input, replyTo); });
       },
       showError: (copy) => {
         if (!failedId) { showError(copy); return; }
         const id = failedId;
-        setMessages((current) => current.map((item) => item.id === id ? { ...item, error: copy } : item));
+        setMessages((current) => current.map((item) => item.id === id ? { ...item, error: failedCopy ?? copy } : item));
       },
     };
     return sendAttachment(deps, input);
