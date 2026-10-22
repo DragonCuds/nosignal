@@ -131,15 +131,29 @@ const pinMember = async (memberId: string, value: string): Promise<void> => {
 };
 const fingerprint = fingerprintOf;
 
-// ---- Key version floor (S9a) ----
+// ---- Key version floor (S9a, S10a) ----
 // Per (own user, chat) this browser remembers the lowest key version it may still SEND with. A malicious server could otherwise
 // report an older key version as the current one (for a direct chat: our own old envelope, which always opens), and a message
 // would be sealed with a key that a stolen old identity can read. `used` is the highest version this browser sent with; `floor`
 // follows it, and is raised further when the user accepts a contact's new identity (the next version must be a fresh one).
-// Reading older messages never looks at the floor.
-type KeyFloor = { floor: number; used: number };
+// `pins` (S10a) is a snapshot of every other member's CURRENT pin at the moment `used` was last recorded (same transaction).
+// A pin belongs to a contact, a floor to a chat: accepting a new identity in one chat does not touch the floor of another chat
+// with the same contact. The snapshot closes that gap: once a member's pin differs from it, no version up to `used` may be
+// sent with, whichever chat the identity was accepted in, and however far a failed accept got. A record without `pins`
+// (written before S10a) is an empty snapshot. Reading older messages never looks at the floor.
+type KeyFloor = { floor: number; used: number; pins: Record<string, string> };
 const floorKey = (chatId: string): string => `${identity!.userId}:${chatId}`;
 const wholeNumber = (value: unknown): number => (typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : 0);
+const readSnapshot = (value: unknown): Record<string, string> => {
+  const pins: Record<string, string> = {};
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return pins;
+  for (const [memberId, pin] of Object.entries(value)) if (typeof pin === 'string' && pin.length > 0) Object.defineProperty(pins, memberId, { value: pin, enumerable: true, writable: true, configurable: true });
+  return pins;
+};
+const readFloorRecord = (stored: unknown): KeyFloor => {
+  const record = (stored ?? {}) as Partial<KeyFloor>;
+  return { floor: wholeNumber(record.floor), used: wholeNumber(record.used), pins: readSnapshot(record.pins) };
+};
 const readFloor = async (chatId: string): Promise<KeyFloor> => {
   if (!identity) throw new Error('Encryption identity is not initialized');
   const db = await openDb();
@@ -149,12 +163,14 @@ const readFloor = async (chatId: string): Promise<KeyFloor> => {
       request.onsuccess = () => resolve(request.result as unknown);
       request.onerror = () => reject(request.error);
     });
-    const record = (stored ?? {}) as Partial<KeyFloor>;
-    return { floor: wholeNumber(record.floor), used: wholeNumber(record.used) };
+    return readFloorRecord(stored);
   } finally { db.close(); }
 };
-/** Raises (never lowers) the floor and/or the highest used version in one transaction. */
-const raiseFloor = async (chatId: string, change: { floor?: number; used?: number }): Promise<void> => {
+/**
+ * Raises (never lowers) the floor and/or the highest used version in one transaction. With `pins` the snapshot is replaced in the
+ * same transaction (it goes together with `used`); without it the stored snapshot is kept.
+ */
+const raiseFloor = async (chatId: string, change: { floor?: number; used?: number; pins?: Record<string, string> }): Promise<void> => {
   if (!identity) throw new Error('Encryption identity is not initialized');
   const key = floorKey(chatId);
   const db = await openDb();
@@ -164,12 +180,13 @@ const raiseFloor = async (chatId: string, change: { floor?: number; used?: numbe
       const store = transaction.objectStore('keyFloors');
       const request = store.get(key);
       request.onsuccess = () => {
-        const old = (request.result ?? {}) as Partial<KeyFloor>;
+        const old = readFloorRecord(request.result);
         const next: KeyFloor = {
-          floor: Math.max(wholeNumber(old.floor), change.floor ?? 0, change.used ?? 0),
-          used: Math.max(wholeNumber(old.used), change.used ?? 0)
+          floor: Math.max(old.floor, change.floor ?? 0, change.used ?? 0),
+          used: Math.max(old.used, change.used ?? 0),
+          pins: change.pins ?? old.pins
         };
-        if (next.floor !== wholeNumber(old.floor) || next.used !== wholeNumber(old.used)) store.put(next, key);
+        if (change.pins || next.floor !== old.floor || next.used !== old.used) store.put(next, key);
       };
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
@@ -183,61 +200,100 @@ export class ChatKeyRollbackError extends Error {
   constructor() { super('Encryption key is unavailable: the chat key went back to an older version. کلید گفت‌وگو به نسخهٔ قدیمی‌تری برگشته است؛ برای امنیت ارسال انجام نشد.'); this.name = 'ChatKeyRollbackError'; }
 }
 
+/**
+ * May a key of version `version` be handed out for NEW messages of this chat? (S10a) `memberIds` are the chat's members as the
+ * caller has them loaded (direct chat: the crypto state; group: the group detail). Refuses (ChatKeyRollbackError):
+ *  - a version below the floor;
+ *  - a version up to the last one used, when the current pin of any member that is in the stored snapshot AND still a member differs
+ *    from the snapshot: after somebody's identity changed, only a version newer than the last used one is acceptable.
+ * Returns the snapshot of the members' current pins; the caller records it with `used` once it really hands the key out.
+ * Members that are not in the snapshot (new) or are no longer members are ignored.
+ */
+const checkSendVersion = async (chatId: string, version: number, memberIds: readonly string[]): Promise<Record<string, string>> => {
+  if (!identity) throw new Error('Encryption identity is not initialized');
+  const record = await readFloor(chatId);
+  if (version < record.floor) throw new ChatKeyRollbackError();
+  const pins: Record<string, string> = {};
+  for (const memberId of memberIds) {
+    if (memberId === identity.userId) continue;
+    const pin = await readPin(memberId);
+    if (pin) Object.defineProperty(pins, memberId, { value: pin, enumerable: true, writable: true, configurable: true });
+  }
+  if (version <= record.used) {
+    for (const memberId of memberIds) {
+      if (Object.prototype.hasOwnProperty.call(record.pins, memberId) && pins[memberId] !== record.pins[memberId]) throw new ChatKeyRollbackError();
+    }
+  }
+  return pins;
+};
+/** Records the version handed out and the pin snapshot it was checked against, in one IndexedDB transaction. */
+const recordSendVersion = (chatId: string, version: number, pins: Record<string, string>): Promise<void> => raiseFloor(chatId, { used: version, pins });
+
 export type KeyChange = { memberId: string; oldFingerprint: string; newFingerprint: string };
 
-/** Contacts of this chat whose server-side key no longer matches the pinned one. Never changes any pin. */
-export const checkKeyChanges = async (chatId: string): Promise<KeyChange[]> => {
-  if (!identity || channelOfChat.has(chatId)) return [];
+type KeyScan = { changes: KeyChange[]; dm?: ChatCryptoState; group?: GroupDetail };
+/** One fetch of the chat's members, compared with the pins. Never changes any pin. */
+const scanKeyChanges = async (chatId: string): Promise<KeyScan> => {
+  if (!identity || channelOfChat.has(chatId)) return { changes: [] };
   let keys: Array<{ memberId: string; publicKey: JsonWebKey | null }>;
+  const scan: KeyScan = { changes: [] };
   const groupId = groupOfChat.get(chatId);
-  if (groupId) keys = (await groupsApi.get(groupId)).members.map((member) => ({ memberId: member.id, publicKey: member.publicKey }));
-  else keys = (await api.chatCrypto(chatId)).members.map((member) => ({ memberId: member.userId, publicKey: member.publicKey }));
-  const changes: KeyChange[] = [];
+  if (groupId) { scan.group = await groupsApi.get(groupId); keys = scan.group.members.map((member) => ({ memberId: member.id, publicKey: member.publicKey })); }
+  else { scan.dm = await api.chatCrypto(chatId); keys = scan.dm.members.map((member) => ({ memberId: member.userId, publicKey: member.publicKey })); }
   for (const { memberId, publicKey } of keys) {
     if (memberId === identity.userId || !publicKey) continue;
     const pinned = await readPin(memberId);
     const actual = await fingerprint(publicKey);
-    if (pinned && pinned !== actual) changes.push({ memberId, oldFingerprint: pinned, newFingerprint: actual });
+    if (pinned && pinned !== actual) scan.changes.push({ memberId, oldFingerprint: pinned, newFingerprint: actual });
   }
-  return changes;
+  return scan;
 };
 
-/** The user explicitly accepted the contact's new key: make it the current pin and drop everything derived from the old one. */
+/** Contacts of this chat whose server-side key no longer matches the pinned one. Never changes any pin. */
+export const checkKeyChanges = async (chatId: string): Promise<KeyChange[]> => (await scanKeyChanges(chatId)).changes;
+
+/**
+ * The user explicitly accepted the contact's new key: make it the current pin and drop everything derived from the old one.
+ * (S10a) Everything the floor needs is fetched and computed BEFORE the pin is written, so a network failure leaves the old pin in
+ * place. Should anything still fail after the pin is written, the pin snapshot in the floor record keeps every version up to
+ * `used` unusable (checkSendVersion). The caches are cleared in any case.
+ */
 export const acceptKeyChange = async (chatId: string, change: KeyChange): Promise<void> => {
-  const current = (await checkKeyChanges(chatId)).find((item) => item.memberId === change.memberId);
-  if (!current || current.newFingerprint !== change.newFingerprint) throw new Error('The key changed again; review it first');
-  // The new key becomes the current pin; the previous ones stay in the history so keys this contact wrapped earlier still open.
-  await writePins(change.memberId, acceptPin(await readPins(change.memberId), current.newFingerprint));
-  if (!groupOfChat.has(chatId)) {
-    // Private chat (S9a): the contact's identity just changed, so a version made for the OLD identity must not be used to send
-    // any more (the contact may have lost that key, or had it stolen). The lowest acceptable version becomes:
-    //  - the one the server is still waiting for (`pending`) and never lower than the version after the last one this browser
-    //    sent with; or, when nothing is pending,
-    //  - the current version if the contact wrapped it with the key just accepted (it was made after the change), else the
-    //    version after the last one this browser used.
-    // A server that later goes back to a lower version, even one this browser never saw, is refused (dmSendKeys).
-    const state = await api.chatCrypto(chatId);
-    let floor = (await readFloor(chatId)).used + 1;
-    if (state.pendingKeyVersion != null) floor = Math.max(floor, state.pendingKeyVersion);
-    else {
-      const envelope = state.envelopes.find((item) => item.version === state.keyVersion);
-      if (envelope && envelope.senderId === change.memberId && envelope.senderPublicKey && await fingerprint(envelope.senderPublicKey) === current.newFingerprint) floor = Math.max(floor, state.keyVersion);
+  try {
+    const scan = await scanKeyChanges(chatId);
+    const current = scan.changes.find((item) => item.memberId === change.memberId);
+    if (!current || current.newFingerprint !== change.newFingerprint) throw new Error('The key changed again; review it first');
+    let floor: number;
+    if (scan.group) {
+      // Group: the floor is the version the server is waiting for, nothing more. A version this browser has used or seen is not
+      // counted: an admin may already have made the next version after the change, and that one has to stay usable (the normal
+      // path). The pin snapshot refuses the versions made before the change.
+      floor = scan.group.pendingKeyVersion ?? 0;
+    } else {
+      // Private chat (S9a): the contact's identity just changed, so a version made for the OLD identity must not be used to send
+      // any more (the contact may have lost that key, or had it stolen). The lowest acceptable version becomes:
+      //  - the one the server is still waiting for (`pending`) and never lower than the version after the last one this browser
+      //    sent with; or, when nothing is pending,
+      //  - the current version if the contact wrapped it with the key just accepted (it was made after the change), else the
+      //    version after the last one this browser used.
+      // A server that later goes back to a lower version, even one this browser never saw, is refused (dmSendKeys).
+      const state = scan.dm!;
+      floor = (await readFloor(chatId)).used + 1;
+      if (state.pendingKeyVersion != null) floor = Math.max(floor, state.pendingKeyVersion);
+      else {
+        const envelope = state.envelopes.find((item) => item.version === state.keyVersion);
+        if (envelope && envelope.senderId === change.memberId && envelope.senderPublicKey && await fingerprint(envelope.senderPublicKey) === current.newFingerprint) floor = Math.max(floor, state.keyVersion);
+      }
     }
+    // The new key becomes the current pin; the previous ones stay in the history so keys this contact wrapped earlier still open.
+    await writePins(change.memberId, acceptPin(await readPins(change.memberId), current.newFingerprint));
     await raiseFloor(chatId, { floor });
-  } else {
-    // Group (S9a): same idea. A member's identity changed, so the version this browser has been sending with (made while that
-    // member still had the old identity) must not be used any more; only a later one. A server that hides the pending rotation and
-    // hands out the old version again is refused (sendGroupKey). The floor is the version after the last one USED here, and at
-    // least the one the server is waiting for. A version this browser has merely seen is not counted: an admin may already have
-    // made the next version after the change, and that one has to stay usable (it is the normal path).
-    const groupId = groupOfChat.get(chatId)!;
-    const pending = (await groupsApi.get(groupId).catch(() => undefined))?.pendingKeyVersion ?? 0;
-    await raiseFloor(chatId, { floor: Math.max((await readFloor(chatId)).used + 1, pending) });
+  } finally {
+    keyCache.clear();
+    dmCache.clear();
+    dmReadCache.clear();
+    groupCtxs.clear();
   }
-  keyCache.clear();
-  dmCache.clear();
-  dmReadCache.clear();
-  groupCtxs.clear();
 };
 
 export const hasLocalIdentity = async (userId: string): Promise<boolean> => Boolean(await dbGet(userId));
@@ -380,7 +436,7 @@ const wrapKey = async (scope: string, recipientId: string, creatorId: string, pu
 // carry the sender's public key from back then, accepted only if this browser pinned that fingerprint earlier (dmKeys.ts).
 // `key` is the key for NEW messages; absent when the server reports a version below this browser's floor (S9a): the older keys
 // in `keys` still open older messages.
-type DmKeys = { version: number; key: CryptoKey | undefined; keys: Map<number, CryptoKey>; loadedAt: number };
+type DmKeys = { version: number; key: CryptoKey | undefined; keys: Map<number, CryptoKey>; loadedAt: number; /** Member ids of the chat as loaded (for the pin snapshot, S10a). */ members: string[] };
 const dmCache = new Map<string, Promise<DmKeys>>();
 // (dmReadCache, below, is cleared next to it)
 
@@ -500,7 +556,7 @@ const loadDmKeys = async (chatId: string): Promise<DmKeys> => {
   if (!currentKey && state.keyVersion >= floor) throw new Error('Encryption key is unavailable');
   const reading = readEntry(chatId);
   for (const [version, key] of keys) reading.keys.set(version, key);
-  return { version: state.keyVersion, key: currentKey, keys, loadedAt: Date.now() };
+  return { version: state.keyVersion, key: currentKey, keys, loadedAt: Date.now(), members: state.members.map((member) => member.userId) };
 };
 
 const dmKeysFor = (chatId: string): Promise<DmKeys> => {
@@ -518,11 +574,17 @@ const dmKeysFor = (chatId: string): Promise<DmKeys> => {
  * (or a floor raised by another tab) is noticed.
  */
 const dmSendKeys = async (chatId: string): Promise<{ key: CryptoKey; version: number }> => {
-  const floor = async () => (await readFloor(chatId)).floor;
+  // Null when this load cannot be used for sending: no key for new messages, below the floor, or a member's identity changed since
+  // `used` was recorded (S10a). The caller re-reads once before it refuses.
+  const claim = async (keys: DmKeys): Promise<Record<string, string> | null> => {
+    if (!keys.key) return null;
+    try { return await checkSendVersion(chatId, keys.version, keys.members); } catch (caught) { if (caught instanceof ChatKeyRollbackError) return null; throw caught; }
+  };
   let keys = await dmKeysFor(chatId);
-  if (!keys.key || keys.version < await floor()) { dmCache.delete(chatId); keys = await dmKeysFor(chatId); }
-  if (!keys.key || keys.version < await floor()) throw new ChatKeyRollbackError();
-  await raiseFloor(chatId, { used: keys.version });
+  let pins = await claim(keys);
+  if (!pins) { dmCache.delete(chatId); keys = await dmKeysFor(chatId); pins = await claim(keys); }
+  if (!keys.key || !pins) throw new ChatKeyRollbackError();
+  await recordSendVersion(chatId, keys.version, pins);
   return { key: keys.key, version: keys.version };
 };
 
@@ -673,8 +735,8 @@ const sendGroupKey = async (chatId: string): Promise<{ key: CryptoKey; version: 
   const detail = ctx.detail;
   const key = ctx.sendable.has(ctx.latest) ? ctx.keys.get(ctx.latest) : undefined;
   if (!detail || !key || detail.pendingKeyVersion != null || ctx.latest < detail.keyVersion) throw new Error('کلید گروه هنوز آماده نیست؛ کمی بعد دوباره تلاش کنید.');
-  if (ctx.latest < (await readFloor(chatId)).floor) throw new ChatKeyRollbackError();
-  await raiseFloor(chatId, { used: ctx.latest });
+  const sendPins = await checkSendVersion(chatId, ctx.latest, detail.members.map((member) => member.id));
+  await recordSendVersion(chatId, ctx.latest, sendPins);
   return { key, version: ctx.latest };
 };
 const groupKeyCandidates = async (chatId: string, version: number | undefined): Promise<CryptoKey[]> => {

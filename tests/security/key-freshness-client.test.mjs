@@ -243,7 +243,8 @@ test('S9a-1: the server sends the new key of a pinned contact with an empty, nul
 const sendMessageOk = async (...args) => (await sendMessage(...args)).encrypted;
 
 // ---- finding 2 (direct chats): the version floor ---------------------------------------------------------------------------------------------
-const floorOf = (profile, user, chatId) => profileOf(profile).stores.keyFloors.get(`${ids[user]}:${chatId}`);
+// Only floor and used: the record also carries the pin snapshot (S10a), which has its own tests (floor-identity-snapshot.test.mjs).
+const floorOf = (profile, user, chatId) => { const { floor, used } = profileOf(profile).stores.keyFloors.get(`${ids[user]}:${chatId}`) ?? {}; return { floor, used }; };
 test('S9a-2: after accepting the contact\'s new key, going back to the old version is refused, even though the new version was never seen here', async () => {
   const dan = await open('dan', 'dan'); const cy = await open('cyd', 'cyd');
   await init(dan, 'dan'); await init(cy, 'cyd');
@@ -360,7 +361,7 @@ test('S9a-2e: an old group version handed out as "latest" while the group is at 
   tamper.delete('ivy');
   const honest = await groupBrowser('ivy', 'ivy', g);
   assert.equal((await encrypt(honest, 'ivy', g.chatId)).keyVersion, 2);
-  assert.deepEqual(profileOf('ivy').stores.keyFloors.get(`${ids.ivy}:${g.chatId}`), { floor: 2, used: 2 });
+  assert.deepEqual(floorOf('ivy', 'ivy', g.chatId), { floor: 2, used: 2 });
   const consistent = await groupBrowser('ivy', 'ivy', g);
   groupLie('ivy', g, { detail: { keyVersion: 1, pendingKeyVersion: null }, keys: old });   // the whole group state rolled back
   await assert.rejects(encrypt(consistent, 'ivy', g.chatId), (e) => e.name === 'ChatKeyRollbackError');
@@ -449,7 +450,7 @@ test('S9a-2f: group: after accepting a member\'s new key, a server that hides th
   groupLie('ivy', g, { detail: { keyVersion: 2, pendingKeyVersion: null }, keys: old });
   await assert.rejects(encrypt(lying, 'ivy', g.chatId), (e) => e.name === 'ChatKeyRollbackError');
   tamper.delete('ivy');
-  assert.deepEqual(profileOf('ivy').stores.keyFloors.get(`${ids.ivy}:${g.chatId}`), { floor: 3, used: 2 });
+  assert.deepEqual(floorOf('ivy', 'ivy', g.chatId), { floor: 3, used: 2 });
   // the normal way: an admin makes version 3 for everyone's current keys, and sending opens again
   const owner = await groupBrowser('gia', 'gia', g);
   for (const change of await as(owner, (m) => m.checkKeyChanges(g.chatId))) await as(owner, (m) => m.acceptKeyChange(g.chatId, change));
