@@ -339,7 +339,7 @@ export const registerSecurityRoutes = async (app: FastifyInstance): Promise<void
   });
 
   app.post<{ Body: { expectedUserId?: unknown; currentPassword?: string; newPassword?: string; secondFactor?: string; backup?: unknown; expectedBackupRevision?: unknown } }>('/api/security/password', {
-    preHandler: app.requireUser, bodyLimit: 16 * 1024, config: { rateLimit: { max: 5, timeWindow: '1 hour' } }
+    preHandler: app.requireUser, bodyLimit: 48 * 1024, config: { rateLimit: { max: 5, timeWindow: '1 hour' } }
   }, async (request, reply) => {
     if (request.body?.expectedUserId !== request.user!.id) return reply.code(403).send({ error: 'Backup account does not match session' });
     const { currentPassword, newPassword, secondFactor, expectedBackupRevision } = request.body ?? {};

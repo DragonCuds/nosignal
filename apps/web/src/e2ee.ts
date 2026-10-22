@@ -3,7 +3,7 @@ import { api, ApiError, type ChatCryptoState, type ChatMessageSummary, type Mess
 import { groupsApi, type GroupDetail, type GroupKeyEntry } from './groups/groupsApi.js';
 import { isStaleKeyError } from './keyErrors.js';
 import { b64ToBytes, bytesToB64, fingerprintOf, openEnvelopes, senderKeyFor, unwrapChatKey, wrapChatKey } from './dmKeys.js';
-import { acceptPin, currentPin, isLegacyPin, normalizePins, type PinList } from './pins.js';
+import { acceptPin, currentPin, isLegacyPin, mergePins, normalizePins, pinsForBackup, readBackupPins, type PinList } from './pins.js';
 
 type Content = Pick<ChatMessageSummary, 'kind' | 'text' | 'payload'>;
 type StoredIdentity = { userId: string; privateKey: CryptoKey; publicKey: JsonWebKey; fingerprint: string };
@@ -99,6 +99,28 @@ const readPins = async (memberId: string): Promise<PinList> => {
   return list;
 };
 const readPin = async (memberId: string): Promise<string | undefined> => currentPin(await readPins(memberId));
+/** Every pin history of THIS user (keys `${userId}:${contactId}`), for the backup. Reads only; legacy single values are read as lists. */
+const readAllPins = async (userId: string): Promise<Array<[string, PinList]>> => {
+  const prefix = `${userId}:`;
+  const db = await openDb();
+  try {
+    const { keys, values } = await new Promise<{ keys: IDBValidKey[]; values: unknown[] }>((resolve, reject) => {
+      const store = db.transaction('pins').objectStore('pins');
+      const found = { keys: [] as IDBValidKey[], values: [] as unknown[] };
+      const keyRequest = store.getAllKeys();
+      const valueRequest = store.getAll();
+      keyRequest.onsuccess = () => { found.keys = keyRequest.result; };
+      valueRequest.onsuccess = () => { found.values = valueRequest.result as unknown[]; resolve(found); };
+      keyRequest.onerror = () => reject(keyRequest.error);
+      valueRequest.onerror = () => reject(valueRequest.error);
+    });
+    const result: Array<[string, PinList]> = [];
+    keys.forEach((key, index) => {
+      if (typeof key === 'string' && key.startsWith(prefix) && key.length > prefix.length) result.push([key.slice(prefix.length), normalizePins(values[index])]);
+    });
+    return result;
+  } finally { db.close(); }
+};
 /** First contact pins the key. A different key for an already pinned contact is never pinned here: it is reported. */
 const pinMember = async (memberId: string, value: string): Promise<void> => {
   const list = await readPins(memberId);
@@ -198,7 +220,12 @@ const payloadOf = async (record: StoredIdentity, known?: JsonWebKey): Promise<Ba
     if (!record.privateKey.extractable) return null;
     jwk = await crypto.subtle.exportKey('jwk', record.privateKey);
   }
-  return { userId: record.userId, publicKey: record.publicKey, privateKey: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, d: jwk.d } };
+  const payload: BackupPayload = { userId: record.userId, publicKey: record.publicKey, privateKey: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, d: jwk.d } };
+  // The pin history goes along, so a restored browser can open envelopes a contact wrapped with an identity this user had accepted.
+  // Failing to read it must not stop the identity from being backed up.
+  const pins = pinsForBackup(await readAllPins(record.userId).catch(() => []));
+  if (pins) payload.pins = pins;
+  return payload;
 };
 
 /** Same as getBackup but straight from this browser's storage (works before initializeEncryption ran). */
@@ -240,10 +267,21 @@ export const importIdentity = async (payload: BackupPayload, beforeWrite?: () =>
   beforeWrite?.();
   identity = next;
   sessionPrivateJwk = payload.privateKey;
+  await restorePins(payload.pins);
   keyCache.clear();
   dmCache.clear();
   groupCtxs.clear();
   await api.registerCryptoIdentity(next.userId, next.publicKey, undefined, signal);
+};
+
+/**
+ * Merge the pin history of a backup into this browser's pins (see pins.mergePins). Backups made before pins were included have
+ * none, and that is fine. A pin that cannot be written is skipped: the identity itself is already restored.
+ */
+const restorePins = async (stored: BackupPayload['pins']): Promise<void> => {
+  for (const [contactId, fromBackup] of readBackupPins(stored)) {
+    try { await writePins(contactId, mergePins(await readPins(contactId), fromBackup)); } catch { /* keep going with the other contacts */ }
+  }
 };
 
 // Groups: one wrapped string per member, original envelope format (no key version in the additional data).
