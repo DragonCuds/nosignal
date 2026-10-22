@@ -1,10 +1,14 @@
 // Key backup: passphrase-encrypted export/import of the E2EE identity (M7.1).
 // Standalone (no app imports) so it can be tested under node.
+import type { BackupPins } from '../pins.js';
+
 export type BackupPayload = {
   userId: string;
   publicKey: JsonWebKey;
   privateKey: JsonWebKey; // ECDH P-256 private JWK
   groupKeys?: Record<string, string>; // optional: chatId -> base64url raw chat key
+  /** Optional: this user's pin history per contact (contact id -> accepted fingerprints, oldest first, current last). Backups made before it exist without it. */
+  pins?: BackupPins;
 };
 export type BackupFile = { app: 'tel-messenger-key-backup'; v: 1; kdf: 'PBKDF2-SHA256'; iter: number; salt: string; iv: string; ct: string };
 

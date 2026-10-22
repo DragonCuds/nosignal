@@ -130,10 +130,10 @@ test('validation: weak KDF cost, bad base64, oversize, wrong version and unknown
   const cookie = await signup('bk_valid');
   for (const bad of [
     goodBlob({ iterations: 1000 }), goodBlob({ iterations: 600_000.5 }), goodBlob({ iterations: 99_000_000 }), goodBlob({ iterations: '600000' }),
-    goodBlob({ salt: 'short' }), goodBlob({ salt: '!'.repeat(22) }), goodBlob({ wrapped: b64(10) }), goodBlob({ wrapped: b64(5_000) }),
+    goodBlob({ salt: 'short' }), goodBlob({ salt: '!'.repeat(22) }), goodBlob({ wrapped: b64(10) }), goodBlob({ wrapped: b64(33_000) }),
     goodBlob({ wrapped: 'a b'.repeat(20) }), goodBlob({ version: 2 }), goodBlob({ version: undefined }), {}
   ]) assert.equal((await call(cookie, 'PUT', '/api/crypto/backup', bad)).statusCode, 400, JSON.stringify(bad).slice(0, 80));
-  const huge = await call(cookie, 'PUT', '/api/crypto/backup', { ...goodBlob(), junk: 'x'.repeat(40_000) });
+  const huge = await call(cookie, 'PUT', '/api/crypto/backup', { ...goodBlob(), junk: 'x'.repeat(60_000) });
   assert.equal(huge.statusCode, 413);
   assert.equal((await call(cookie, 'GET', '/api/crypto/backup')).statusCode, 404);
 });

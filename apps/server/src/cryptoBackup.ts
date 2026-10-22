@@ -31,7 +31,7 @@ const recordEvent = (client: DbClient, userId: string, action: 'backup.created' 
 
 export const BACKUP_MIN_ITERATIONS = 600_000;
 export const BACKUP_MAX_ITERATIONS = 5_000_000;
-export const BACKUP_MAX_WRAPPED = 4_096; // a P-256 private JWK payload wraps to well under 1 KiB; groups of keys may grow it
+export const BACKUP_MAX_WRAPPED = 32_768; // the identity wraps to well under 1 KiB; the pin history (apps/web/src/pins.ts, 16 KB budget) and group keys make up the rest
 
 const b64 = (value: unknown, min: number, max: number): value is string =>
   typeof value === 'string' && value.length >= min && value.length <= max && /^[A-Za-z0-9_-]+$/.test(value);
@@ -97,7 +97,7 @@ export const registerCryptoBackupRoutes = async (app: FastifyInstance): Promise<
 
   // Stores/replaces the one copy of the caller and switches the account to mode "auto".
   app.put<{ Body: { salt?: unknown; iterations?: unknown; wrapped?: unknown; version?: unknown; expectedUserId?: unknown; expectedRevision?: unknown; password?: unknown; actionToken?: unknown } }>('/api/crypto/backup', {
-    config: { rateLimit: WRITE_LIMIT }, preHandler: app.requireUser, bodyLimit: 16 * 1024
+    config: { rateLimit: WRITE_LIMIT }, preHandler: app.requireUser, bodyLimit: 48 * 1024
   }, async (request, reply) => {
     if (request.body?.expectedUserId !== request.user!.id) return reply.code(403).send({ error: 'Backup account does not match session' });
     const blob = parseBackupBlob(request.body);
