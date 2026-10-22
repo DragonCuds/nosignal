@@ -171,7 +171,7 @@ test('TLS_MODE=auto: https, Secure cookie, /ca.crt, SPA /join/*', async () => {
   assert.equal(migrate(dir).status, 0);
   assert.equal(cli(dir, ['carol', 'carol']).status, 0);
   const origin = `https://127.0.0.1:${TLS_PORT}`;
-  await start(baseEnv(dir, { NODE_ENV: 'production', PORT: String(TLS_PORT), TLS_MODE: 'auto', TLS_HOSTS: 'localhost,127.0.0.1', TRUSTED_ORIGINS: origin, WEBAUTHN_RP_ID: '127.0.0.1' }),
+  await start(baseEnv(dir, { NODE_ENV: 'production', CHANNEL_KEYRING: `wireup:${Buffer.alloc(32, 9).toString('base64url')}`, CHANNEL_ACTIVE_KEY_ID: 'wireup', PORT: String(TLS_PORT), TLS_MODE: 'auto', TLS_HOSTS: 'localhost,127.0.0.1', TRUSTED_ORIGINS: origin, WEBAUTHN_RP_ID: '127.0.0.1' }),
     async () => (await httpsReq(TLS_PORT, '/api/health')).status === 200);
   const res = await httpsReq(TLS_PORT, '/api/auth/login', {
     method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'carol', password: PW })
