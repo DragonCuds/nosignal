@@ -35,6 +35,14 @@ The bundled ffmpeg is an LGPL build (no GPL or non-free components, H.264 via Op
 
 Update: copy the new release file and run `sudo /opt/tel-messenger/scripts/update.sh --source nosignal-NEW-full.tar.gz`.
 
+On an installed copy the scripts run with the bundled Node, as the service user and with the service's environment, for example (service stopped, `ca.key` in place; see DEPLOYMENT.md):
+
+```sh
+sudo systemctl stop tel-messenger
+sudo -u tel-messenger bash -c 'set -a; . /etc/tel-messenger.env; set +a; cd /opt/tel-messenger && ./node/bin/node scripts/renew-local-cert.mjs'
+sudo systemctl start tel-messenger
+```
+
 ## B. Online install (git/npm/apt, nginx + Let's Encrypt)
 
 ```sh

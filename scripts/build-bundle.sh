@@ -45,7 +45,7 @@ npm ci --omit=dev --no-audit --no-fund
 B="$W/$NAME"; mkdir "$B"
 cp -a package.json package-lock.json node_modules deploy docs assets "$B/"
 for f in LICENSE README.md README.fa.md INSTALL-FA.md DEPLOYMENT.md SECURITY.md THIRD-PARTY-NOTICES.md .env.example install.sh; do [ -e "$f" ] && cp "$f" "$B/"; done
-mkdir "$B/scripts"; cp scripts/update.sh scripts/backup.sh "$B/scripts/"
+mkdir "$B/scripts"; cp scripts/update.sh scripts/backup.sh scripts/renew-local-cert.mjs scripts/regenerate-ca.mjs "$B/scripts/"
 for d in apps/server apps/web packages/media-contract packages/stickers; do
   mkdir -p "$B/$d"; cp "$d/package.json" "$B/$d/"
   [ -d "$d/node_modules" ] && cp -a "$d/node_modules" "$B/$d/"
