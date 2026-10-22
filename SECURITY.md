@@ -11,7 +11,7 @@ Please report suspected vulnerabilities privately through **GitHub private secur
 
 ## Supported deployment
 
-Security fixes target the current main-branch revision on Node.js 24 with supported nginx (or the built-in TLS mode) and ffmpeg packages. Data is stored in SQLite under `DATA_DIR`. Older revisions and modified public-network listeners are not supported. Follow [DEPLOYMENT.md](DEPLOYMENT.md) for the expected trust boundaries.
+Security fixes target the latest release and the current main-branch revision on Node.js 24 with supported nginx (or the built-in TLS mode) and ffmpeg packages. Data is stored in SQLite under `DATA_DIR`. Older revisions and modified public-network listeners are not supported. Follow [DEPLOYMENT.md](DEPLOYMENT.md) for the expected trust boundaries.
 
 ## Operator baseline
 
@@ -122,6 +122,22 @@ There is no "forgot password" flow and no admin tool to reset a user's password.
 
 ---
 
+## Release schedule
+
+Regular fixes ship in scheduled releases about every two weeks; the next one is **0.3.0 on 6 November 2026**. A serious security issue does not wait for the schedule: it gets a patch release (0.2.2, 0.2.3, …) as soon as it is fixed. Non-security work that anyone can help with is listed under the [`help wanted`](https://github.com/DragonCuds/nosignal/labels/help%20wanted) label.
+
+## Known limitations (0.2.1)
+
+These are known and not fixed yet. None of them lets a malicious server read messages on its own; each needs a further condition, or is a deliberate design choice.
+
+- **A new or freshly restored browser, until its first message in a chat.** A browser remembers, per chat, which key versions it already sent with and which contact keys they were made for, and refuses to go back to an older one. A browser that has not sent anything in a chat yet (new device, restored from a backup, cleared site data) has nothing to compare with. If the server is malicious *and* someone holds a contact's old identity key (for example from a stolen device), that browser's first messages in that chat could be sealed with an old chat key that the old key opens. From its first send on, the protection applies. This record is not part of the key backup yet.
+- **Group membership is announced by the server.** A malicious server can add a member to a group. That member is shown in the group's member list, and a member whose key is new to you is trusted on first use, like any new contact. Fixing this needs key transparency; it is a design limit shared by messengers without it.
+- **Auto mode backup (the default).** As described above, in Auto mode the server operator can in principle decrypt the key backup. Users who do not accept this can switch to Power mode.
+- **The automatic server backup is not refreshed after you accept a contact's new key.** A browser restored from the server copy asks you to confirm that contact's key again. This is safe (it warns rather than trusts) but inconvenient. A manual backup file is always current.
+- **Two open tabs** can, in a very narrow timing window, record the key version they used at the same moment; the effect is limited to that tab pair.
+- **Backups carry at most the newest 32 accepted keys per contact** (the browser itself keeps all). Only a contact who started fresh more than 32 times is affected.
+- **Pin history from a backup is trusted.** See "Pin history in backups" above: whoever can change an accepted backup (its passphrase, or the server in Auto mode) can add a historical key; it never becomes a contact's current key.
+
 ## خلاصهٔ فارسی (Persian summary)
 
 توضیح کامل و ساده‌تر: [docs/fa/security.md](docs/fa/security.md)
@@ -134,5 +150,11 @@ There is no "forgot password" flow and no admin tool to reset a user's password.
 - «شروع تازه» یک کلید جدید می‌سازد؛ پیام‌های رمزشدهٔ قبلی و پیام‌های ذخیره‌شدهٔ خودتان برای شما ناخواناست، ولی مخاطب‌ها تاریخچهٔ گفتگو را نگه می‌دارند (اگر هر دو طرف شروع تازه بزنند، پیام‌های قدیمی برای هیچ‌کدام باز نمی‌شود).
 - ثبت‌نام باز به‌طور پیش‌فرض خاموش است (`OPEN_REGISTRATION`) و ثبت‌نام و ورود محدودیت تعداد تلاش دارند.
 - رویدادهای حضور (آنلاین و آخرین بازدید) فقط به مخاطبی در گفت‌وگوی مستقیم دونفره می‌رسند که خود کاربر قبلاً برای او پیام فعال فرستاده باشد. ساخت یک‌طرفهٔ گفتگو یا عضویت گروه، مجوز دیدن حضور ایجاد نمی‌کند.
+- **محدودیت‌های شناخته‌شده در ۰٫۲٫۱** (جزئیات به انگلیسی در بالا):
+  - مرورگر تازه یا تازه‌بازیابی‌شده تا اولین پیامش در هر گفتگو چیزی برای مقایسهٔ نسخهٔ کلید ندارد. اگر هم سرور مخرب باشد و هم کسی کلید قدیمی مخاطب را دزدیده باشد، اولین پیام‌های آن مرورگر ممکن است با کلید قدیمی بروند. از اولین ارسال به بعد این راه بسته است.
+  - عضویت گروه را سرور اعلام می‌کند. سرور مخرب می‌تواند عضوی اضافه کند، ولی آن عضو در فهرست اعضا دیده می‌شود.
+  - در حالت خودکار، مدیر سرور در اصل به پشتیبان کلید دسترسی دارد. حالت امنیت بیشتر این را می‌بندد.
+  - پشتیبان خودکار سرور بعد از تأیید کلید تازهٔ مخاطب به‌روز نمی‌شود. مرورگرِ بازیابی‌شده از آن، دوباره همان هشدار را نشان می‌دهد (امن است، فقط مزاحم است).
+- **زمان‌بندی نسخه‌ها:** اصلاح‌های عادی حدوداً هر دو هفته منتشر می‌شوند. نسخهٔ بعدی **۰٫۳٫۰ در ۶ نوامبر ۲۰۲۶** است. مشکل امنیتی جدی منتظر نمی‌ماند و نسخهٔ وصله (۰٫۲٫۲ و بعدی) می‌گیرد. کارهای غیرامنیتی که هر کسی می‌تواند کمک کند، با برچسب `help wanted` در GitHub مشخص شده‌اند.
 - گزارش آسیب‌پذیری: از بخش «Report a vulnerability» (Private advisories) در صفحهٔ GitHub پروژه استفاده کنید؛ لطفاً مشکل را عمومی منتشر نکنید.
 
