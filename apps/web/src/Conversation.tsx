@@ -3,6 +3,7 @@ import { api, type Chat, type Gif, type GifMessagePayload, type Message, type Ou
 import { DownIcon } from './icons.js';
 import { acceptKeyChange, checkKeyChanges, decryptMessage as decryptPlain, encryptContent, KeyChangedError, onKeyChangeSuspected, StaleChatKeyError, withFreshChatKey } from './e2ee.js';
 import { discard as discardOutbox, enqueue, listOutbox, newClientMsgId, onOutboxChange, onOutboxSent, retryNow, type OutboxRow } from './outbox.js';
+import { buildOutboxRow } from './outboxRow.js';
 import { cacheEventMessage, cacheMessages, forgetPlain, plainOf, readCachedMessages, rememberPlain, type SyncSignal } from './sync.js';
 import { decryptMessageMedia as decryptMessage, decryptMessagesMedia as decryptMessages, encryptMediaMessage } from './encrypted-media.js';
 import { dayKey, faNumber } from './ui.js';
@@ -488,7 +489,7 @@ export function Conversation({ chat, currentUser, realtimeEvent, sync, peerPrese
     rememberPlain(clientMsgId, plain);
     freshKeys.current.add(tempKey(clientMsgId));
     setMode(null);
-    enqueue({ clientMsgId, chatId: chat.id, kind, encrypted, encryptedMediaId, replyToId: replyTo, text: null, payload: null });
+    enqueue(buildOutboxRow({ clientMsgId, chatId: chat.id, kind, encrypted, encryptedMediaId, replyTo, plain }));
     requestAnimationFrame(() => follow());
   };
 
