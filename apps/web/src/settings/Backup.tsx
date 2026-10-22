@@ -194,7 +194,7 @@ export function Backup({ userId, getBackup, onImport }: Props) {
         <>
           <p className="group__lead"><strong>حالت امنیت بیشتر روشن است.</strong> هیچ نسخه‌ای از کلید روی سرور نیست و رمز عبور شما به‌تنهایی کلید را باز نمی‌کند. در دستگاه جدید باید کلید بازیابی یا فایل پشتیبان را وارد کنید؛ اگر هر دو را گم کنید، پیام‌های قبلی برای همیشه ناخواناست.</p>
           {exportable && filePayload && omittedFile > 0 && <div className="group__notice" role="status">{fileText(omittedFile)}</div>}
-          {exportable && filePayload ? <RecoveryExport userId={userId} payload={filePayload} /> : <div className="group__notice group__notice--error">کلید این دستگاه با نسخهٔ قدیمی ساخته شده و قابل نمایش نیست.</div>}
+          {exportable ? <RecoveryExport userId={userId} payload={filePayload ?? payload} /> : <div className="group__notice group__notice--error">کلید این دستگاه با نسخهٔ قدیمی ساخته شده و قابل نمایش نیست.</div>}
           {step !== 'to-auto'
             ? <div className="group__actions"><button className="button button--soft" type="button" onClick={() => { setStep('to-auto'); setMsg(''); }}>بازگشت به حالت خودکار</button></div>
             : (
