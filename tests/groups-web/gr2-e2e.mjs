@@ -1,10 +1,9 @@
 // gr-2 end-to-end: real server on https://127.0.0.1:3067, headless chromium.
 import puppeteer from 'puppeteer-core';
-import { mkdirSync } from 'node:fs';
+import { makeRun } from '../web-e2e/lib.mjs';
 
 const BASE = process.env.BASE ?? 'https://127.0.0.1:3067';
-const SHOTS = '/root/tel-dev/shots/gr2';
-mkdirSync(SHOTS, { recursive: true });
+const SHOTS = makeRun('gr2').shots;
 const tag = Math.random().toString(36).slice(2, 7);
 const names = { A: `ga${tag}`, B: `gb${tag}`, C: `gc${tag}` };
 const PASS = 'pass-word-1234';

@@ -1,11 +1,18 @@
 // Incoming media (GIF / sticker / photo) from the other side, real server (see start script in tasks), two browser contexts.
 import { coolDown, launch, makeRun, fresh, goto, signup, startChatWith, openChatRow, sleep, tag } from './lib.mjs';
+import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 const BASE = process.env.BASE ?? 'https://127.0.0.1:3105';
 const FX = new URL('./fixtures/', import.meta.url).pathname;
 const run = makeRun('media');
 const t = tag(); const NA = `ma${t}`; const NB = `mb${t}`;
 const browser = await launch();
+let photoDir;
 try {
+  photoDir = mkdtempSync(join(homedir(), 'nosignal-media-'));
+  const photoPath = join(photoDir, 'photo.png');
+  copyFileSync(FX + 'photo.png', photoPath);
   const A = await fresh(browser, 'A'); await goto(A, BASE); await signup(A, NA);
   const B = await fresh(browser, 'B'); await goto(B, BASE); await signup(B, NB);
   await startChatWith(A, NB);
@@ -45,7 +52,7 @@ try {
   await A.click('.sticker-grid button'); await sleep(3000);
   // photo from A
   const inputs = await A.$$('input.composer__file');
-  await inputs[1].uploadFile(FX + 'photo.png'); await sleep(2000);
+  await inputs[1].uploadFile(photoPath); await sleep(2000);
   await A.screenshot({ path: run.shots + '/A-after.png' });
   await sleep(6000);
   await B.screenshot({ path: run.shots + '/B-live.png' });
@@ -69,5 +76,8 @@ try {
   const csp = await B.evaluate(async () => (await fetch('/')).headers.get('content-security-policy') ?? '');
   run.check('CSP allows blob: for img/media/connect (decrypted media is shown from blob URLs)', /img-src[^;]*blob:/.test(csp) && /media-src[^;]*blob:/.test(csp) && /connect-src[^;]*blob:/.test(csp), csp.slice(0, 200));
 } catch (e) { console.log('ERROR', e); run.fail(); }
-finally { await browser.close(); }
+finally {
+  try { await browser.close(); }
+  finally { if (photoDir) rmSync(photoDir, { recursive: true, force: true }); }
+}
 run.done();
